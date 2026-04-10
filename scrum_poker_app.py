@@ -17,7 +17,7 @@ from smallos_websocket_server import SmallWebSocketServerConnection, WebSocketSe
 
 
 HOST = "0.0.0.0"
-port = int(os.environ.get("PORT", 8082))
+PORT = int(os.environ.get("PORT", 8082))
 LISTEN_BACKLOG = 24
 REQUEST_HEADER_LIMIT = 8 * 1024
 HEADER_READ_TIMEOUT_SECONDS = 10  # close slow-loris connections after this many seconds
