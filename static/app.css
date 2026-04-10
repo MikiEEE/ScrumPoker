@@ -43,8 +43,47 @@ body {
 .page-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 24px;
   padding: 0 0 20px;
+}
+
+.header-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.header-status .session-status {
+  font-size: 0.78rem;
+  font-weight: 600;
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.header-status .session-status::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+  opacity: 0.8;
+}
+
+.header-stat {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.header-sep {
+  font-size: 0.78rem;
+  color: var(--muted);
+  opacity: 0.35;
 }
 
 .page-title {
@@ -59,22 +98,24 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 7px 11px;
+  padding: 7px 12px;
   border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  background: rgba(7, 12, 26, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.04);
   color: var(--muted);
   text-decoration: none;
   font-size: 0.72rem;
   letter-spacing: 0.02em;
-  opacity: 0.55;
+  white-space: nowrap;
   backdrop-filter: blur(8px);
-  transition: opacity 200ms ease, border-color 200ms ease;
+  transition: background 180ms ease, border-color 180ms ease, color 180ms ease, transform 180ms ease;
 }
 
 .powered-by:hover {
-  opacity: 1;
-  border-color: rgba(255, 159, 67, 0.4);
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 159, 67, 0.38);
+  color: var(--text);
+  transform: translateY(-1px);
 }
 
 .panel {
@@ -91,12 +132,6 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.12em;
   color: var(--muted);
-}
-
-.session-status {
-  font-size: 1.35rem;
-  font-weight: 700;
-  margin: 0 0 6px;
 }
 
 .session-status.open {
@@ -274,6 +309,27 @@ button:disabled {
   border-radius: 18px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(255, 255, 255, 0.04);
+}
+
+.panel-divider {
+  height: 1px;
+  background: var(--line);
+  margin: 20px 0;
+}
+
+.admin-controls-inline h2 {
+  margin: 0 0 12px;
+}
+
+.notice-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+
+.notice-strip:empty {
+  display: none;
 }
 
 .notice {
@@ -502,6 +558,7 @@ button:disabled {
     opacity: 0;
     transform: translateY(18px);
   }
+
   to {
     opacity: 1;
     transform: translateY(0);

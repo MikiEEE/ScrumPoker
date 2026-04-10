@@ -22,6 +22,7 @@ REQUEST_HEADER_LIMIT = 8 * 1024
 MAX_FRAME_SIZE = 64 * 1024
 MAX_MESSAGE_SIZE = 256 * 1024
 OUTBOX_SIGNAL = 9
+MAX_PARTICIPANTS = 50
 ALLOWED_VOTES = (
     "0",
     "0.5",
@@ -43,7 +44,8 @@ SMALLOS_ROOT = next(iter(SmallOS.__path__))
 CONFIG_PATH = os.path.join(SMALLOS_ROOT, "smallos.config.json")
 DOTENV_PATH = os.path.join(PROJECT_ROOT, ".env")
 STATIC_DIR = os.path.join(PROJECT_ROOT, "static")
-SESSION_RESUME_GRACE_SECONDS = 45
+SESSION_RESUME_GRACE_SECONDS = 45  # how long a disconnected participant's slot is held before they're removed from the board
+IDLE_TIMEOUT_SECONDS = 3600  # 1 hour of no activity kicks and closes the session
 STATIC_ASSETS = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/static/app.css": ("app.css", "text/css; charset=utf-8"),
@@ -191,11 +193,13 @@ def _static_asset_response(path):
 
 def _new_state(runtime):
     """Return the shared in-memory scrum poker session state."""
+    now = runtime.kernel.scheduler_now_ms()
     return {
         "kernel": runtime.kernel,
         "listener": None,
         "os": runtime,
-        "started_ms": runtime.kernel.scheduler_now_ms(),
+        "started_ms": now,
+        "last_activity_ms": now,
         "session_open": True,
         "votes_visible": False,
         "next_connection_id": 1,
@@ -292,9 +296,20 @@ def _now_ms(state):
     return kernel.scheduler_now_ms()
 
 
+def _touch_activity(state):
+    """Record that meaningful activity just occurred, resetting the idle clock."""
+    state["last_activity_ms"] = _now_ms(state)
+
+
 def _connected_count(state):
     """Return the number of live websocket transports."""
     return sum(1 for connection in state.get("connections", {}).values() if connection.get("connected", True))
+
+
+def _joined_count(state):
+    """Return the number of participants that currently occupy a board slot."""
+    _expire_stale_connections(state)
+    return sum(1 for connection in state.get("connections", {}).values() if connection.get("name") and not connection.get("closed"))
 
 
 def _new_session_token():
@@ -595,6 +610,17 @@ def _kick_connection(state, target_connection):
         pass
 
 
+def _clear_everyone(state):
+    """Kick every participant off the board and close the session."""
+    participants = list(state.get("connections", {}).values())
+    for connection in participants:
+        _kick_connection(state, connection)
+    state["session_open"] = False
+    state["votes_visible"] = False
+    _touch_activity(state)
+    return len(participants)
+
+
 def _apply_client_message(state, connection, payload):
     """Apply one parsed client websocket message to the shared state."""
     if not isinstance(payload, dict):
@@ -608,7 +634,10 @@ def _apply_client_message(state, connection, payload):
             return "names must be between 1 and 32 characters"
         if not state["session_open"] and not connection.get("name") and not connection.get("is_admin"):
             return "joining is currently disabled by the administrator"
+        if not connection.get("name") and not connection.get("is_admin") and _joined_count(state) >= MAX_PARTICIPANTS:
+            return "this session is full (max {} participants)".format(MAX_PARTICIPANTS)
         connection["name"] = name
+        _touch_activity(state)
         return None
 
     if message_type == "become_admin":
@@ -628,22 +657,35 @@ def _apply_client_message(state, connection, payload):
         if vote is None:
             return "unsupported vote value"
         connection["vote"] = vote
+        _touch_activity(state)
         return None
 
     if message_type == "toggle_votes":
+        if not connection.get("name"):
+            return "join the session before revealing votes"
         state["votes_visible"] = not state["votes_visible"]
+        _touch_activity(state)
         return None
 
     if message_type == "show_votes":
+        if not connection.get("name"):
+            return "join the session before revealing votes"
         state["votes_visible"] = True
+        _touch_activity(state)
         return None
 
     if message_type == "hide_votes":
+        if not connection.get("name"):
+            return "join the session before hiding votes"
         state["votes_visible"] = False
+        _touch_activity(state)
         return None
 
     if message_type == "clear_votes":
+        if not connection.get("name"):
+            return "join the session before discarding votes"
         _clear_votes(state)
+        _touch_activity(state)
         return None
 
     if message_type == "set_session_open":
@@ -653,6 +695,7 @@ def _apply_client_message(state, connection, payload):
         if desired_state not in (True, False):
             return "session action requires open=true or open=false"
         _set_session_open(state, desired_state)
+        _touch_activity(state)
         _queue_notice(
             connection,
             "Session opened for new participants." if desired_state else "Session closed for new participants.",
@@ -673,6 +716,7 @@ def _apply_client_message(state, connection, payload):
             return "that user is no longer connected"
         target_label = target_connection.get("name") or "client {}".format(target_id)
         _kick_connection(state, target_connection)
+        _touch_activity(state)
         _queue_notice(connection, "Removed {} from the session.".format(target_label), kind="success")
         return None
 
@@ -706,6 +750,16 @@ class ScrumPokerShell(BaseShell):
             "Manage team joins. Usage: session [open|close|status|toggle]",
             aliases=("joins",),
         )
+        self._register_poker_command(
+            "idle",
+            self.command_idle,
+            "Show or reset the idle timeout clock. Usage: idle [reset]",
+        )
+        self._register_poker_command(
+            "clear",
+            self.command_clear,
+            "Kick everyone off the board. Usage: clear everyone",
+        )
 
     def command_poker(self, args):
         """Show scrum-poker-specific shell commands."""
@@ -733,20 +787,69 @@ class ScrumPokerShell(BaseShell):
 
         if action == "open":
             self.poker_state["session_open"] = True
+            _touch_activity(self.poker_state)
             _broadcast_state(self.poker_state)
             return "joining enabled"
 
         if action == "close":
             self.poker_state["session_open"] = False
+            _touch_activity(self.poker_state)
             _broadcast_state(self.poker_state)
             return "joining disabled"
 
         if action == "toggle":
             self.poker_state["session_open"] = not self.poker_state["session_open"]
+            _touch_activity(self.poker_state)
             _broadcast_state(self.poker_state)
             return "joining {}".format("enabled" if self.poker_state["session_open"] else "disabled")
 
         raise ShellCommandError("usage: session [open|close|status|toggle]")
+
+    def command_idle(self, args):
+        """Show time since last activity, or reset the idle clock."""
+        action = args[0] if args else "status"
+
+        if action == "reset":
+            _touch_activity(self.poker_state)
+            return "idle clock reset"
+
+        if action == "status":
+            idle_ms = _now_ms(self.poker_state) - self.poker_state.get("last_activity_ms", _now_ms(self.poker_state))
+            idle_s = max(0, idle_ms // 1000)
+            remaining_s = max(0, IDLE_TIMEOUT_SECONDS - idle_s)
+            return "idle for {}s / timeout in {}s ({}min)".format(idle_s, remaining_s, remaining_s // 60)
+
+        raise ShellCommandError("usage: idle [status|reset]")
+
+    def command_clear(self, args):
+        """Kick everyone off the board and close the session."""
+        action = args[0] if args else "everyone"
+
+        if action not in ("everyone", "all"):
+            raise ShellCommandError("usage: clear everyone")
+
+        cleared_count = _clear_everyone(self.poker_state)
+        _broadcast_state(self.poker_state)
+        return "cleared {} participant(s); session closed".format(cleared_count)
+
+
+async def idle_watchdog_task(task, state):
+    """Kick everyone and close the session after IDLE_TIMEOUT_SECONDS of no activity."""
+    check_interval = 60  # wake up every minute to check
+    while True:
+        await task.sleep(check_interval)
+        idle_ms = _now_ms(state) - state.get("last_activity_ms", _now_ms(state))
+        if idle_ms < IDLE_TIMEOUT_SECONDS * 1000:
+            continue
+
+        task.OS.print("[scrum-poker] idle timeout reached — kicking all participants\n")
+        for connection in list(state.get("connections", {}).values()):
+            if connection.get("connected") and connection.get("name"):
+                _queue_notice(connection, "Session closed due to inactivity.", kind="error")
+        # Give the writer tasks a brief moment to flush the notice before kicking.
+        await task.sleep(1)
+        _clear_everyone(state)
+        task.OS.print("[scrum-poker] session closed after idle timeout\n")
 
 
 async def _send_all(task, sock, data):
@@ -1102,6 +1205,7 @@ def main():
     runtime.shells.append(shell.setOS(runtime))
 
     web_server = SmallTask(2, web_server_task, name="web_server", args=(state,))
+    idle_watchdog = SmallTask(2, idle_watchdog_task, name="idle_watchdog", args=(state,))
     shell_stdin = shell.make_task(
         priority=3,
         name="shell_stdin",
@@ -1109,12 +1213,12 @@ def main():
         poll_interval=0.1,
         banner_text=(
             "\nInteractive scrum poker shell enabled.\n"
-            "Commands: session open, session close, session status, ps, stat <pid>, toggle, help\n"
+            "Commands: session open, session close, session status, clear everyone, ps, stat <pid>, toggle, help\n"
         ),
         force_output=True,
     )
 
-    runtime.fork([web_server, shell_stdin])
+    runtime.fork([web_server, idle_watchdog, shell_stdin])
 
     try:
         runtime.startOS()
