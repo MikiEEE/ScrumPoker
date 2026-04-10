@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sprint Poker</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="page">
+    <header class="page-header">
+      <span class="page-title">Sprint Poker</span>
+      <a class="powered-by" href="https://github.com/MikiEEE/SmallOS/tree/master" target="_blank" rel="noreferrer">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 15.5A3.5 3.5 0 0 1 8.5 12 3.5 3.5 0 0 1 12 8.5a3.5 3.5 0 0 1 3.5 3.5 3.5 3.5 0 0 1-3.5 3.5m7.43-2.92c.04-.34.07-.69.07-1.08s-.03-.74-.07-1.08l2.11-1.63c.19-.15.24-.42.12-.64l-2-3.46c-.12-.22-.39-.3-.61-.22l-2.49 1c-.52-.4-1.08-.73-1.69-.98l-.38-2.65C14.46 2.18 14.25 2 14 2h-4c-.25 0-.46.18-.49.42l-.38 2.65c-.61.25-1.17.59-1.69.98l-2.49-1c-.23-.09-.49 0-.61.22l-2 3.46c-.13.22-.07.49.12.64L4.57 11c-.04.34-.07.69-.07 1.08s.03.74.07 1.08L2.46 14.8c-.19.15-.24.42-.12.64l2 3.46c.12.22.39.3.61.22l2.49-1c.52.4 1.08.73 1.69.98l.38 2.65c.03.24.24.42.49.42h4c.25 0 .46-.18.49-.42l.38-2.65c.61-.25 1.17-.59 1.69-.98l2.49 1c.23.09.49 0 .61-.22l2-3.46c.12-.22.07-.49-.12-.64l-2.11-1.63z"/></svg>
+        Powered by SmallOS
+      </a>
+    </header>
+
+    <section class="layout">
+      <aside class="stack">
+        <section class="panel">
+          <h2>Join The Table</h2>
+          <form class="join-form" id="joinForm">
+            <label class="field-label" for="nameInput">Display name</label>
+            <input id="nameInput" name="name" type="text" maxlength="32" placeholder="Ada Lovelace" autocomplete="name">
+            <div class="button-row">
+              <button type="submit" id="joinButton">Join Session</button>
+              <button id="adminUnlockButton" class="button-secondary" type="button">Become Admin</button>
+            </div>
+          </form>
+
+          <div class="admin-auth-panel" id="adminAuthPanel" hidden>
+            <form class="join-form" id="adminAuthForm">
+              <label class="field-label" for="adminPassphraseInput">Admin passphrase</label>
+              <input id="adminPassphraseInput" name="admin_passphrase" type="password" maxlength="128" placeholder="Enter passphrase" autocomplete="current-password">
+              <div class="button-row">
+                <button type="submit" id="adminAuthSubmitButton">Unlock Admin</button>
+                <button id="adminAuthCancelButton" class="button-secondary" type="button">Cancel</button>
+              </div>
+            </form>
+          </div>
+
+          <div class="status-row">
+            <span class="status-chip" id="socketChip">Socket connected</span>
+            <span class="status-chip admin-chip" id="adminChip" hidden>Admin enabled</span>
+          </div>
+          <p class="help-text" id="joinHelp">The terminal shell can still open or close joining with <code>session open</code> and <code>session close</code>.</p>
+          <p class="muted" id="adminStatus">Admin controls are available when the server is configured with <code>ADMIN_PASSPHRASE</code>.</p>
+        </section>
+
+        <section class="panel" id="adminControlsPanel" hidden>
+          <h2>Admin Controls</h2>
+          <div class="button-row">
+            <button type="button" id="openSessionButton">Open Session</button>
+            <button type="button" id="closeSessionButton" class="button-danger">Close Session</button>
+          </div>
+          <p class="muted">Admins can reopen joining, pause new joins, and kick users directly from the board.</p>
+        </section>
+
+        <section class="panel">
+          <h2>Room Status</h2>
+          <div id="sessionStatus" class="session-status">Waiting for server...</div>
+          <div class="status-line" id="statusLine">Connecting...</div>
+          <div class="hero-metrics">
+            <div class="metric">
+              <div class="metric-label">Participants</div>
+              <div class="metric-value" id="participantCount">0</div>
+            </div>
+            <div class="metric">
+              <div class="metric-label">Votes Cast</div>
+              <div class="metric-value" id="votesCast">0</div>
+            </div>
+            <div class="metric">
+              <div class="metric-label">Connected</div>
+              <div class="metric-value" id="connectedCount">0</div>
+            </div>
+            <div class="metric">
+              <div class="metric-label">Server Time</div>
+              <div class="metric-value" id="serverTime">-</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Session Notices</h2>
+          <div id="noticeArea" class="stack">
+            <div class="notice">Live updates will appear here when the room state changes.</div>
+          </div>
+        </section>
+      </aside>
+
+      <main class="panel">
+        <div class="vote-section">
+          <h2>Your Vote</h2>
+          <div class="muted" id="voteSummary">Join the session to cast a vote.</div>
+          <div class="vote-grid" id="voteGrid"></div>
+        </div>
+
+        <div class="board-meta">
+          <div>
+            <h2 class="board-title">Board</h2>
+            <div class="muted" id="boardSummary">Waiting for participants.</div>
+          </div>
+          <div class="board-actions">
+            <button id="toggleVotesButton" class="button-secondary" type="button">Show Votes</button>
+            <button id="clearVotesButton" class="button-danger" type="button">Discard Votes</button>
+          </div>
+        </div>
+        <div class="participant-grid" id="participantGrid"></div>
+        <div class="footer">Hidden rounds show who voted without exposing the value.</div>
+      </main>
+    </section>
+  </div>
+
+  <script src="/static/app.js" defer></script>
+</body>
+</html>
