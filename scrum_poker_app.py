@@ -1,5 +1,6 @@
 """Cooperative websocket scrum poker app built on top of SmallOS."""
 
+import hmac
 import os
 from datetime import datetime, timezone
 import json
@@ -19,10 +20,15 @@ HOST = "0.0.0.0"
 PORT = 8082
 LISTEN_BACKLOG = 24
 REQUEST_HEADER_LIMIT = 8 * 1024
+HEADER_READ_TIMEOUT_SECONDS = 10  # close slow-loris connections after this many seconds
 MAX_FRAME_SIZE = 64 * 1024
 MAX_MESSAGE_SIZE = 256 * 1024
 OUTBOX_SIGNAL = 9
 MAX_PARTICIPANTS = 50
+MAX_CONNECTIONS = 200  # total concurrent WebSocket transports (joined + anonymous)
+MAX_ADMIN_FAILURES = 5  # per-connection lockout after this many wrong passphrase guesses
+MESSAGE_RATE_LIMIT_MS = 50  # minimum ms between processed messages per connection (~20/sec)
+MESSAGE_RATE_BURST = 100  # disconnect after this many back-to-back throttled messages
 ALLOWED_VOTES = (
     "0",
     "0.5",
@@ -93,6 +99,10 @@ def _http_response(status_code, body, content_type="text/plain; charset=utf-8", 
         "Content-Length: {}".format(len(body_bytes)),
         "Connection: close",
         "Cache-Control: no-store",
+        "X-Content-Type-Options: nosniff",
+        "X-Frame-Options: DENY",
+        "Referrer-Policy: no-referrer",
+        "Content-Security-Policy: default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'",
     ]
     for name, value in list(headers or ()):
         response_headers.append("{}: {}".format(name, value))
@@ -200,7 +210,7 @@ def _new_state(runtime):
         "os": runtime,
         "started_ms": now,
         "last_activity_ms": now,
-        "session_open": True,
+        "session_open": False,
         "votes_visible": False,
         "next_connection_id": 1,
         "connections": {},
@@ -342,6 +352,16 @@ def _expire_stale_connections(state):
             continue
         if now_ms >= deadline:
             _remove_connection_record(state, connection)
+
+
+def _connections_over_hard_cap(state):
+    """Return True when the total connection record count is at the hard cap.
+
+    Triggers a forced stale-connection sweep first so normal expiry doesn't
+    count against legitimate users.
+    """
+    _expire_stale_connections(state)
+    return len(state.get("connections", {})) >= MAX_CONNECTIONS * 2
 
 
 def _make_connection_record(state, client_addr, session_token=None, tab_id=None):
@@ -644,8 +664,16 @@ def _apply_client_message(state, connection, payload):
         expected = _get_admin_passphrase()
         if not expected:
             return "admin access is not configured on this server"
-        if str("" if payload.get("passphrase") is None else payload.get("passphrase")) != expected:
+        # Lock out this connection after too many failures to prevent brute-force
+        failures = connection.get("admin_failures", 0)
+        if failures >= MAX_ADMIN_FAILURES:
+            return "too many failed attempts — reconnect to try again"
+        supplied = str("" if payload.get("passphrase") is None else payload.get("passphrase"))
+        # Use constant-time comparison to prevent timing side-channel attacks
+        if not hmac.compare_digest(supplied.encode(), expected.encode()):
+            connection["admin_failures"] = failures + 1
             return "incorrect admin passphrase"
+        connection["admin_failures"] = 0
         connection["is_admin"] = True
         _queue_notice(connection, "Admin access granted.", kind="success")
         return None
@@ -902,8 +930,11 @@ async def _read_request_head(task, sock):
     """Read HTTP headers until CRLFCRLF or until the safety cap is hit."""
     kernel = task.OS.kernel
     data = bytearray()
+    deadline_ms = kernel.scheduler_now_ms() + (HEADER_READ_TIMEOUT_SECONDS * 1000)
 
     while b"\r\n\r\n" not in data:
+        if kernel.scheduler_now_ms() > deadline_ms:
+            raise TimeoutError("request header read timed out")
         try:
             chunk = kernel.socket_recv(sock, 1024)
         except Exception as exc:
@@ -983,6 +1014,25 @@ async def websocket_writer_task(task, connection):
 
 async def websocket_session(task, sock, client_addr, state, headers):
     """Upgrade one HTTP client into a live websocket scrum poker session."""
+    # H3: Validate WebSocket Origin to prevent cross-site hijacking.
+    # Set ALLOWED_ORIGINS env var to a comma-separated list of allowed origins
+    # (e.g. "https://poker.example.com"). Leave unset to allow all origins
+    # (safe when nginx/Cloudflare restricts public access to one hostname).
+    allowed_origins_env = os.environ.get("ALLOWED_ORIGINS", "").strip()
+    if allowed_origins_env:
+        allowed_origins = {o.strip().rstrip("/") for o in allowed_origins_env.split(",") if o.strip()}
+        request_origin = headers.get("origin", "").strip().rstrip("/")
+        if request_origin and request_origin not in allowed_origins:
+            await _send_all(task, sock, _http_response(403, "origin not allowed\n"))
+            return
+
+    # C1/M3: Reject new WebSocket connections when the server is at capacity.
+    # Also enforces a hard cap on total connection records (including stale ones)
+    # to prevent rapid connect/disconnect from accumulating unbounded memory.
+    if _connected_count(state) >= MAX_CONNECTIONS or _connections_over_hard_cap(state):
+        await _send_all(task, sock, _http_response(503, "too many connections\n"))
+        return
+
     try:
         websocket = await SmallWebSocketServerConnection.accept(
             task,
@@ -1032,9 +1082,24 @@ async def websocket_session(task, sock, client_addr, state, headers):
                 _queue_error(connection, "binary websocket messages are not supported")
                 continue
 
+            # H5: Per-connection message rate limiting (~20 messages/sec).
+            now_ms = _now_ms(state)
+            if now_ms - connection.get("last_msg_ms", 0) < MESSAGE_RATE_LIMIT_MS:
+                burst = connection.get("rate_burst", 0) + 1
+                connection["rate_burst"] = burst
+                if burst > MESSAGE_RATE_BURST:
+                    _queue_error(connection, "rate limit exceeded — slowing down too fast")
+                    connection["shutdown_after_drain"] = True
+                    if writer_task is not None:
+                        writer_task.acceptSignal(OUTBOX_SIGNAL)
+                    return
+                continue
+            connection["last_msg_ms"] = now_ms
+            connection["rate_burst"] = 0
+
             try:
                 message = json.loads(event["data"])
-            except ValueError:
+            except (ValueError, RecursionError):
                 _queue_error(connection, "messages must contain valid JSON")
                 continue
 
@@ -1100,6 +1165,9 @@ async def web_client_handler(task, client_sock, client_addr, state):
     try:
         try:
             request_head = await _read_request_head(task, client_sock)
+        except TimeoutError:
+            # C2: Slow-loris connection — header arrived too slowly; drop it silently.
+            return
         except ValueError:
             await _send_all(task, client_sock, _http_response(413, "request header too large\n"))
             return
@@ -1127,11 +1195,18 @@ async def web_client_handler(task, client_sock, client_addr, state):
         elif static_payload is not None:
             payload = static_payload
         elif path == "/api/state":
-            payload = _http_response(
-                200,
-                _json_bytes(_build_public_state(state)),
-                "application/json; charset=utf-8",
-            )
+            # M2: Require a valid session token to access the raw state endpoint.
+            # This prevents unauthenticated metadata harvesting.
+            _, api_params = _parse_request_target(target)
+            api_token = api_params.get("session_token")
+            if not api_token or api_token not in state.get("connections_by_token", {}):
+                payload = _http_response(403, "forbidden\n")
+            else:
+                payload = _http_response(
+                    200,
+                    _json_bytes(_build_public_state(state)),
+                    "application/json; charset=utf-8",
+                )
         elif path == "/healthz":
             payload = _http_response(200, "ok\n")
         else:
