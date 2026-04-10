@@ -47,6 +47,13 @@ body {
   padding: 0 0 20px;
 }
 
+.title-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .header-status {
   display: flex;
   align-items: center;
@@ -92,6 +99,20 @@ body {
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--accent);
+}
+
+.instance-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(94, 211, 197, 0.36);
+  background: rgba(94, 211, 197, 0.1);
+  color: var(--teal);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .powered-by {

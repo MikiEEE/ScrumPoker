@@ -1,17 +1,22 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-app-id="__APP_ID__" data-app-label="__APP_LABEL__" data-base-path="__BASE_PATH__"
+  data-ws-path="__WS_PATH__" data-healthz-path="__HEALTHZ_PATH__" data-state-path="__STATE_PATH__"
+  data-storage-key-prefix="__STORAGE_KEY_PREFIX__">
 
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Sprint Poker</title>
-  <link rel="stylesheet" href="/static/app.css">
+  <title>__PAGE_TITLE__</title>
+  <link rel="stylesheet" href="__STATIC_BASE_PATH__/app.css">
 </head>
 
 <body>
   <div class="page">
     <header class="page-header">
-      <span class="page-title">Sprint Poker</span>
+      <div class="title-group">
+        <span class="page-title">Sprint Poker</span>
+        <span class="instance-badge" __INSTANCE_BADGE_HIDDEN__>__APP_LABEL__</span>
+      </div>
 
       <div class="header-status">
         <div id="sessionStatus" class="session-status">Waiting...</div>
@@ -74,7 +79,7 @@
             <span class="status-chip admin-chip" id="adminChip" hidden>Admin enabled</span>
           </div>
           <p class="help-text" id="joinHelp">The terminal shell can still open or close joining with
-            <code>session open</code> and <code>session close</code>.
+            <code>__SHELL_OPEN_COMMAND__</code> and <code>__SHELL_CLOSE_COMMAND__</code>.
           </p>
           <p class="muted" id="adminStatus">Admin controls are available when the server is configured with
             <code>ADMIN_PASSPHRASE</code>.
@@ -116,7 +121,7 @@
     </section>
   </div>
 
-  <script src="/static/app.js" defer></script>
+  <script src="__STATIC_BASE_PATH__/app.js" defer></script>
 </body>
 
 </html>

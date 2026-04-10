@@ -1,4 +1,14 @@
-const defaultVoteOptions = ["0", "1", "2", "3", "5", "8", "13", "21", "34", "55", "89", "?", "coffee"];
+const bootstrap = {
+  appId: document.documentElement.dataset.appId || "root",
+  appLabel: document.documentElement.dataset.appLabel || "",
+  basePath: document.documentElement.dataset.basePath || "/",
+  healthzPath: document.documentElement.dataset.healthzPath || "/healthz",
+  statePath: document.documentElement.dataset.statePath || "/api/state",
+  storageKeyPrefix: document.documentElement.dataset.storageKeyPrefix || "smallos-scrum-poker-root",
+  wsPath: document.documentElement.dataset.wsPath || "/ws",
+};
+
+const defaultVoteOptions = ["0", "0.5", "1", "2", "3", "5", "8", "13", "21", "40", "60", "100", "?", "coffee"];
 
 // Keep the Render free-tier instance awake: one client per 3-minute window pings /healthz.
 // The slot rotates through joined participants so the load is shared naturally.
@@ -15,7 +25,7 @@ function checkKeepAlive() {
 
   // Admins that haven't joined a named slot keep the server alive on their own.
   if (isAdmin && !joined) {
-    fetch("/healthz").catch(() => { });
+    fetch(bootstrap.healthzPath).catch(() => { });
     return;
   }
 
@@ -28,7 +38,7 @@ function checkKeepAlive() {
     const slot = Math.floor(Date.now() / KEEP_ALIVE_INTERVAL_MS);
     const designeeId = sortedIds[slot % sortedIds.length];
     if (me.client_id === designeeId) {
-      fetch("/healthz").catch(() => { });
+      fetch(bootstrap.healthzPath).catch(() => { });
     }
   }
 }
@@ -46,9 +56,9 @@ function cancelKeepAlive() {
     keepAliveTimer = null;
   }
 }
-const nameStorageKey = "smallos-scrum-poker-name";
-const sessionTokenStorageKey = "smallos-scrum-poker-session-token";
-const tabIdStorageKey = "smallos-scrum-poker-tab-id";
+const nameStorageKey = bootstrap.storageKeyPrefix + "-name";
+const sessionTokenStorageKey = bootstrap.storageKeyPrefix + "-session-token";
+const tabIdStorageKey = bootstrap.storageKeyPrefix + "-tab-id";
 
 const appState = {
   adminFormVisible: false,
@@ -92,7 +102,7 @@ const els = {
 
 function websocketUrl() {
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-  const baseUrl = protocol + "://" + window.location.host + "/ws";
+  const baseUrl = protocol + "://" + window.location.host + bootstrap.wsPath;
   const params = new URLSearchParams();
   const sessionToken = window.sessionStorage.getItem(sessionTokenStorageKey);
   const tabId = getTabId();
