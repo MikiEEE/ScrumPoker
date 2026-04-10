@@ -118,6 +118,16 @@ body {
   transform: translateY(-1px);
 }
 
+.github-link:hover {
+  border-color: rgba(88, 166, 255, 0.45);
+}
+
+.header-badges {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .panel {
   border: 1px solid var(--line);
   border-radius: 26px;
