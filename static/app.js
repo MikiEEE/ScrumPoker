@@ -1,4 +1,51 @@
 const defaultVoteOptions = ["0", "1", "2", "3", "5", "8", "13", "21", "34", "55", "89", "?", "coffee"];
+
+// Keep the Render free-tier instance awake: one client per 3-minute window pings /healthz.
+// The slot rotates through joined participants so the load is shared naturally.
+const KEEP_ALIVE_INTERVAL_MS = 3 * 60 * 1000;
+const KEEP_ALIVE_CHECK_MS = 30 * 1000; // how often each client evaluates whether it's their turn
+let keepAliveTimer = null;
+
+function checkKeepAlive() {
+  const me = currentViewer();
+  const isAdmin = viewerIsAdmin();
+  const joined = viewerHasJoined();
+
+  if (!appState.connected) return;
+
+  // Admins that haven't joined a named slot keep the server alive on their own.
+  if (isAdmin && !joined) {
+    fetch("/healthz").catch(() => { });
+    return;
+  }
+
+  // Among joined participants, rotate who pings based on a shared time slot.
+  if (joined) {
+    const session = activeSession();
+    const participants = session.participants || [];
+    if (!participants.length) return;
+    const sortedIds = participants.map((p) => p.client_id).sort((a, b) => a - b);
+    const slot = Math.floor(Date.now() / KEEP_ALIVE_INTERVAL_MS);
+    const designeeId = sortedIds[slot % sortedIds.length];
+    if (me.client_id === designeeId) {
+      fetch("/healthz").catch(() => { });
+    }
+  }
+}
+
+function scheduleKeepAlive() {
+  if (keepAliveTimer !== null) return;
+  // Run once immediately so the very first open counts, then poll every 30s.
+  checkKeepAlive();
+  keepAliveTimer = setInterval(checkKeepAlive, KEEP_ALIVE_CHECK_MS);
+}
+
+function cancelKeepAlive() {
+  if (keepAliveTimer !== null) {
+    clearInterval(keepAliveTimer);
+    keepAliveTimer = null;
+  }
+}
 const nameStorageKey = "smallos-scrum-poker-name";
 const sessionTokenStorageKey = "smallos-scrum-poker-session-token";
 const tabIdStorageKey = "smallos-scrum-poker-tab-id";
@@ -304,8 +351,7 @@ function connect() {
 
   socket.addEventListener("open", () => {
     appState.connected = true;
-    appState.statusLine = "Connected.";;
-    render();
+    appState.statusLine = "Connected.";; scheduleKeepAlive(); render();
   });
 
   socket.addEventListener("message", (event) => {
@@ -352,8 +398,7 @@ function connect() {
 
   socket.addEventListener("close", () => {
     appState.connected = false;
-    appState.statusLine = "Disconnected. Attempting to reconnect...";;
-    render();
+    appState.statusLine = "Disconnected. Attempting to reconnect...";; cancelKeepAlive(); render();
     window.setTimeout(connect, 1200);
   });
 

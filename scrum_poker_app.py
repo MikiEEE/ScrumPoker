@@ -39,9 +39,9 @@ ALLOWED_VOTES = (
     "8",
     "13",
     "21",
-    "34",
-    "55",
-    "89",
+    "40",
+    "60",
+    "100",
     "?",
     "coffee",
 )
@@ -689,28 +689,28 @@ def _apply_client_message(state, connection, payload):
         return None
 
     if message_type == "toggle_votes":
-        if not connection.get("name"):
+        if not connection.get("name") and not connection.get("is_admin"):
             return "join the session before revealing votes"
         state["votes_visible"] = not state["votes_visible"]
         _touch_activity(state)
         return None
 
     if message_type == "show_votes":
-        if not connection.get("name"):
+        if not connection.get("name") and not connection.get("is_admin"):
             return "join the session before revealing votes"
         state["votes_visible"] = True
         _touch_activity(state)
         return None
 
     if message_type == "hide_votes":
-        if not connection.get("name"):
+        if not connection.get("name") and not connection.get("is_admin"):
             return "join the session before hiding votes"
         state["votes_visible"] = False
         _touch_activity(state)
         return None
 
     if message_type == "clear_votes":
-        if not connection.get("name"):
+        if not connection.get("name") and not connection.get("is_admin"):
             return "join the session before discarding votes"
         _clear_votes(state)
         _touch_activity(state)
