@@ -25,6 +25,7 @@ from scrum_poker_core import (
     _read_exact,
     _read_request_head,
     _read_static_asset,
+    _room_has_been_empty_too_long,
     _room_has_expired,
     _send_all,
 )
@@ -248,8 +249,14 @@ class ScrumPokerHost:
 
         removed = 0
         for room_id, room in list(self.ephemeral_rooms.items()):
+            reason = None
             if room.destroyed or _room_has_expired(room.state, now_ms=now_ms):
-                if self.destroy_ephemeral_room(room_id, reason="expired", current_task=current_task):
+                reason = "expired"
+            elif _room_has_been_empty_too_long(room.state, now_ms=now_ms):
+                reason = "empty-timeout"
+
+            if reason is not None:
+                if self.destroy_ephemeral_room(room_id, reason=reason, current_task=current_task):
                     removed += 1
         return removed
 
