@@ -9,18 +9,55 @@ from scrum_poker_host import ScrumPokerHost
 from scrum_poker_shell import ScrumPokerShell
 
 
-__all__ = list(_core_exports) + ["ScrumPokerApp", "ScrumPokerHost", "ScrumPokerShell", "main"]
+DEFAULT_BOARD_CONFIGS = [
+    {
+        "app_id": "root",
+        "base_path": "/",
+        "title": "Sprint Poker",
+        "label": "",
+    },
+    {
+        "app_id": "legalease",
+        "base_path": "/legalease",
+        "title": "Sprint Poker",
+        "label": "Legalease",
+    },
+]
 
 
-def main():
+__all__ = list(_core_exports) + [
+    "DEFAULT_BOARD_CONFIGS",
+    "ScrumPokerApp",
+    "ScrumPokerHost",
+    "ScrumPokerShell",
+    "build_apps",
+    "main",
+]
+
+
+def build_apps(runtime, board_configs=None):
+    """Build one mounted scrum poker app per declarative board config."""
+    apps = []
+    for config in list(board_configs or DEFAULT_BOARD_CONFIGS):
+        apps.append(
+            ScrumPokerApp(
+                app_id=config["app_id"],
+                base_path=config["base_path"],
+                runtime=runtime,
+                title=config.get("title"),
+                label=config.get("label"),
+            )
+        )
+    return apps
+
+
+def main(board_configs=None):
     """Start the multi-instance SmallOS scrum poker runtime."""
     runtime = _build_runtime()
-    root_app = ScrumPokerApp("root", "/", runtime, title="Sprint Poker")
-    legalease_app = ScrumPokerApp("legalease", "/legalease", runtime, title="Sprint Poker", label="Legalease")
-    apps = [root_app, legalease_app]
+    apps = build_apps(runtime, board_configs=board_configs)
     host = ScrumPokerHost(apps, host=_get_host(), port=_get_port())
 
-    shell = ScrumPokerShell(apps, prompt="poker> ", allow_python=False)
+    shell = ScrumPokerShell(apps, host=host, prompt="poker> ", allow_python=False)
     runtime.shells.append(shell.setOS(runtime))
 
     host_task = host.to_task()
@@ -32,7 +69,7 @@ def main():
         poll_interval=0.1,
         banner_text=(
             "\nInteractive scrum poker shell enabled.\n"
-            "Commands: poker apps, poker root session open, poker legalease session open, ps, stat <pid>, toggle, help\n"
+            "Commands: poker apps, poker stats, poker root session open, poker legalease session open, ps, stat <pid>, toggle, help\n"
         ),
         force_output=True,
     )
