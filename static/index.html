@@ -1,7 +1,8 @@
 <!doctype html>
 <html lang="en" data-app-id="__APP_ID__" data-app-label="__APP_LABEL__" data-base-path="__BASE_PATH__"
   data-ws-path="__WS_PATH__" data-healthz-path="__HEALTHZ_PATH__" data-state-path="__STATE_PATH__"
-  data-storage-key-prefix="__STORAGE_KEY_PREFIX__">
+  data-storage-key-prefix="__STORAGE_KEY_PREFIX__" data-room-id="__ROOM_ID__" data-room-kind="__ROOM_KIND__"
+  data-creator-claim-storage-key="__CREATOR_CLAIM_STORAGE_KEY__">
 
 <head>
   <meta charset="utf-8">
@@ -81,9 +82,7 @@
           <p class="help-text" id="joinHelp">The terminal shell can still open or close joining with
             <code>__SHELL_OPEN_COMMAND__</code> and <code>__SHELL_CLOSE_COMMAND__</code>.
           </p>
-          <p class="muted" id="adminStatus">Admin controls are available when the server is configured with
-            <code>ADMIN_PASSPHRASE</code>.
-          </p>
+          <p class="muted" id="adminStatus">Admin controls are available for this room when admin auth is configured.</p>
 
           <div class="admin-controls-inline" id="adminControlsPanel" hidden>
             <div class="panel-divider"></div>
