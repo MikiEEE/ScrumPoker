@@ -104,6 +104,7 @@ Ephemeral room limits:
 
 - max `19` active public rooms at once
 - max `8` named participants per ephemeral room
+- automatic cleanup after `5` minutes with no joined users
 - hard expiry after `2` hours from creation
 - idle destruction after `1` hour with no activity
 

@@ -97,7 +97,7 @@ class TestPublicFlow(unittest.TestCase):
 
         self.assertIn(b"Create a private room", landing)
         self.assertIn(b"/setupRoom", landing)
-        self.assertIn(b"/legalease", landing)
+        self.assertIn(b"/yourcompany", landing)
         self.assertIn(b"Room admin password", setup)
         self.assertIn(b"/static/setup_room.js", setup)
 
@@ -302,6 +302,52 @@ class TestCleanupAndShell(unittest.TestCase):
         self.assertEqual(1, removed)
         self.assertIsNone(host.get_room(expired_room.room_id))
         self.assertIs(active_room, host.get_room(active_room.room_id))
+
+    def test_expire_ephemeral_rooms_removes_empty_rooms_after_five_minutes(self):
+        runtime, host, _ = build_host()
+        room, _ = host.create_ephemeral_room("room-secret")
+
+        before_timeout_ms = room.state["created_ms"] + (demo.EMPTY_EPHEMERAL_ROOM_TIMEOUT_SECONDS * 1000) - 1
+        removed = host.expire_ephemeral_rooms(now_ms=before_timeout_ms)
+        self.assertEqual(0, removed)
+        self.assertIs(room, host.get_room(room.room_id))
+
+        at_timeout_ms = room.state["created_ms"] + (demo.EMPTY_EPHEMERAL_ROOM_TIMEOUT_SECONDS * 1000)
+        removed = host.expire_ephemeral_rooms(now_ms=at_timeout_ms)
+
+        self.assertEqual(1, removed)
+        self.assertIsNone(host.get_room(room.room_id))
+        self.assertEqual("empty-timeout", room.state["destroy_reason"])
+
+    def test_non_empty_ephemeral_room_survives_until_it_has_been_empty_for_five_minutes(self):
+        runtime, host, _ = build_host()
+        room, _ = host.create_ephemeral_room("room-secret")
+        room.state["session_open"] = True
+        connection = add_connection(room)
+        self.assertIsNone(
+            demo._apply_client_message(room.state, connection, {"type": "join", "name": "Alice"})
+        )
+
+        after_creation_timeout_ms = room.state["created_ms"] + (demo.EMPTY_EPHEMERAL_ROOM_TIMEOUT_SECONDS * 1000) + 1000
+        removed = host.expire_ephemeral_rooms(now_ms=after_creation_timeout_ms)
+        self.assertEqual(0, removed)
+        self.assertIs(room, host.get_room(room.room_id))
+
+        runtime.kernel.now_ms = after_creation_timeout_ms
+        demo._kick_connection(room.state, connection)
+        self.assertEqual(after_creation_timeout_ms, room.state["empty_since_ms"])
+
+        almost_empty_timeout_ms = room.state["empty_since_ms"] + (demo.EMPTY_EPHEMERAL_ROOM_TIMEOUT_SECONDS * 1000) - 1
+        removed = host.expire_ephemeral_rooms(now_ms=almost_empty_timeout_ms)
+        self.assertEqual(0, removed)
+        self.assertIs(room, host.get_room(room.room_id))
+
+        full_empty_timeout_ms = room.state["empty_since_ms"] + (demo.EMPTY_EPHEMERAL_ROOM_TIMEOUT_SECONDS * 1000)
+        removed = host.expire_ephemeral_rooms(now_ms=full_empty_timeout_ms)
+
+        self.assertEqual(1, removed)
+        self.assertIsNone(host.get_room(room.room_id))
+        self.assertEqual("empty-timeout", room.state["destroy_reason"])
 
     def test_shell_lists_rooms_and_targets_dynamic_room(self):
         _, host, legalease_room = build_host()
