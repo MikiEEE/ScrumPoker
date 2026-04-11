@@ -27,6 +27,7 @@ from scrum_poker_core import (
     _expire_stale_connections,
     _http_response,
     _json_bytes,
+    _mark_state_dirty,
     _new_state,
     _normalize_base_path,
     _now_ms,
@@ -51,7 +52,7 @@ async def idle_watchdog_task(task, app):
         if idle_ms < IDLE_TIMEOUT_SECONDS * 1000:
             continue
 
-        task.OS.print("[scrum-poker:{}] idle timeout reached — kicking all participants\n".format(app.app_id))
+        task.OS.print("[scrum-poker:{}] idle timeout reached - kicking all participants\n".format(app.app_id))
         for connection in list(state.get("connections", {}).values()):
             if connection.get("connected") and connection.get("name"):
                 _queue_notice(connection, "Session closed due to inactivity.", kind="error")
@@ -175,11 +176,12 @@ class ScrumPokerApp:
         if path == self.state_path:
             _, api_params = _parse_request_target(target)
             api_token = api_params.get("session_token")
-            if not api_token or api_token not in self.state.get("connections_by_token", {}):
+            viewer = self.state.get("connections_by_token", {}).get(api_token) if api_token else None
+            if viewer is None or viewer.get("closed"):
                 return _http_response(403, "forbidden\n")
             return _http_response(
                 200,
-                _json_bytes(_build_public_state(self.state)),
+                _json_bytes(_build_public_state(self.state, viewer_id=viewer["client_id"])),
                 "application/json; charset=utf-8",
             )
 
@@ -187,6 +189,34 @@ class ScrumPokerApp:
             return _http_response(200, "ok\n")
 
         return _http_response(404, "route not found\n")
+
+    def stats_snapshot(self):
+        """Return a lightweight operations snapshot for this mounted board."""
+        _expire_stale_connections(self.state)
+        connections = list(self.state.get("connections", {}).values())
+        joined_users = sum(1 for connection in connections if connection.get("name") and not connection.get("closed"))
+        connected_transports = sum(1 for connection in connections if connection.get("connected", True))
+        pending_state_messages = sum(
+            int(connection.get("pending_shared_state_text") is not None)
+            + int(connection.get("pending_viewer_state_text") is not None)
+            for connection in connections
+        )
+        pending_messages = sum(len(connection.get("pending_messages", ()) or ()) for connection in connections)
+        dropped_state_updates = sum(int(connection.get("dropped_state_updates", 0)) for connection in connections)
+        stats = self.state.get("stats", {})
+        return {
+            "app_id": self.app_id,
+            "base_path": self.base_path,
+            "connected_transports": connected_transports,
+            "dropped_state_updates": dropped_state_updates,
+            "joined_users": joined_users,
+            "last_activity_ms": self.state.get("last_activity_ms", 0),
+            "pending_messages": pending_messages,
+            "pending_state_messages": pending_state_messages,
+            "queue_disconnects": int(stats.get("queue_disconnects", 0)),
+            "shared_state_rebuilds": int(stats.get("shared_state_rebuilds", 0)),
+            "state_version": int(self.state.get("state_version", 0)),
+        }
 
     async def websocket_session(self, task, sock, client_addr, headers):
         """Upgrade one HTTP client into a live websocket scrum poker session."""
@@ -259,7 +289,7 @@ class ScrumPokerApp:
                     burst = connection.get("rate_burst", 0) + 1
                     connection["rate_burst"] = burst
                     if burst > MESSAGE_RATE_BURST:
-                        _queue_error(connection, "rate limit exceeded — slowing down too fast")
+                        _queue_error(connection, "rate limit exceeded - slowing down too fast")
                         connection["shutdown_after_drain"] = True
                         if writer_task is not None:
                             writer_task.acceptSignal(OUTBOX_SIGNAL)
@@ -305,6 +335,7 @@ class ScrumPokerApp:
                 connection["socket"] = None
                 connection["session_task"] = None
                 connection["websocket"] = None
+                _mark_state_dirty(state)
                 if writer_task is not None:
                     writer_task.acceptSignal(OUTBOX_SIGNAL)
 
@@ -333,3 +364,6 @@ class ScrumPokerApp:
     def broadcast_state(self):
         """Queue a fresh state snapshot for every websocket client in this app."""
         _broadcast_state(self.state)
+
+
+__all__ = ["ScrumPokerApp", "idle_watchdog_task"]
