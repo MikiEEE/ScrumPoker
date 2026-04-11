@@ -1,19 +1,20 @@
 const bootstrap = {
-  appId: document.documentElement.dataset.appId || "root",
+  appId: document.documentElement.dataset.appId || "room",
   appLabel: document.documentElement.dataset.appLabel || "",
   basePath: document.documentElement.dataset.basePath || "/",
+  creatorClaimStorageKey: document.documentElement.dataset.creatorClaimStorageKey || "",
   healthzPath: document.documentElement.dataset.healthzPath || "/healthz",
+  roomId: document.documentElement.dataset.roomId || "room",
+  roomKind: document.documentElement.dataset.roomKind || "premium",
   statePath: document.documentElement.dataset.statePath || "/api/state",
-  storageKeyPrefix: document.documentElement.dataset.storageKeyPrefix || "smallos-scrum-poker-root",
+  storageKeyPrefix: document.documentElement.dataset.storageKeyPrefix || "smallos-scrum-poker-room",
   wsPath: document.documentElement.dataset.wsPath || "/ws",
 };
 
 const defaultVoteOptions = ["0", "0.5", "1", "2", "3", "5", "8", "13", "21", "40", "60", "100", "?", "coffee"];
 
-// Keep the Render free-tier instance awake: one client per 3-minute window pings /healthz.
-// The slot rotates through joined participants so the load is shared naturally.
 const KEEP_ALIVE_INTERVAL_MS = 3 * 60 * 1000;
-const KEEP_ALIVE_CHECK_MS = 30 * 1000; // how often each client evaluates whether it's their turn
+const KEEP_ALIVE_CHECK_MS = 30 * 1000;
 let keepAliveTimer = null;
 
 function checkKeepAlive() {
@@ -23,13 +24,11 @@ function checkKeepAlive() {
 
   if (!appState.connected) return;
 
-  // Admins that haven't joined a named slot keep the server alive on their own.
   if (isAdmin && !joined) {
     fetch(bootstrap.healthzPath).catch(() => { });
     return;
   }
 
-  // Among joined participants, rotate who pings based on a shared time slot.
   if (joined) {
     const session = activeSession();
     const participants = session.participants || [];
@@ -45,7 +44,6 @@ function checkKeepAlive() {
 
 function scheduleKeepAlive() {
   if (keepAliveTimer !== null) return;
-  // Run once immediately so the very first open counts, then poll every 30s.
   checkKeepAlive();
   keepAliveTimer = setInterval(checkKeepAlive, KEEP_ALIVE_CHECK_MS);
 }
@@ -56,9 +54,11 @@ function cancelKeepAlive() {
     keepAliveTimer = null;
   }
 }
+
 const nameStorageKey = bootstrap.storageKeyPrefix + "-name";
 const sessionTokenStorageKey = bootstrap.storageKeyPrefix + "-session-token";
 const tabIdStorageKey = bootstrap.storageKeyPrefix + "-tab-id";
+const creatorClaimStorageKey = bootstrap.creatorClaimStorageKey || "";
 
 const appState = {
   adminFormVisible: false,
@@ -113,10 +113,7 @@ function websocketUrl() {
   if (tabId) {
     params.set("tab_id", tabId);
   }
-  if (!params.toString()) {
-    return baseUrl;
-  }
-  return baseUrl + "?" + params.toString();
+  return params.toString() ? baseUrl + "?" + params.toString() : baseUrl;
 }
 
 function createBrowserTabId() {
@@ -189,6 +186,25 @@ function currentVoteOptions() {
     : defaultVoteOptions;
 }
 
+function maybeClaimCreatorAdmin() {
+  if (bootstrap.roomKind !== "ephemeral" || !creatorClaimStorageKey) {
+    return;
+  }
+  const token = window.sessionStorage.getItem(creatorClaimStorageKey);
+  if (token) {
+    send({ type: "claim_creator_admin", token });
+  }
+}
+
+function maybeClearCreatorClaimToken(me) {
+  if (!creatorClaimStorageKey) {
+    return;
+  }
+  if (me && me.is_admin) {
+    window.sessionStorage.removeItem(creatorClaimStorageKey);
+  }
+}
+
 function renderVotes() {
   const selectedVote = currentViewer().vote || null;
   const joined = viewerHasJoined();
@@ -220,7 +236,6 @@ function getInitials(name) {
 function renderParticipants() {
   const session = activeSession();
   const participants = session.participants || [];
-  const votesVisible = Boolean(session.votes_visible);
   const canKick = viewerIsAdmin();
 
   if (!participants.length) {
@@ -245,7 +260,7 @@ function renderParticipants() {
       : !participant.is_connected
         ? "Reconnecting\u2026"
         : participant.has_voted
-          ? (votesVisible ? "Revealed" : "Voted")
+          ? (session.votes_visible ? "Revealed" : "Voted")
           : "Deciding\u2026";
 
     const adminBadge = participant.is_admin ? '<span class="badge">Admin</span>' : "";
@@ -300,6 +315,7 @@ function renderSession() {
   const joined = viewerHasJoined();
   const isAdmin = viewerIsAdmin();
   const adminAvailable = Boolean(session.admin_auth_enabled);
+  const joinLimit = session.join_limit || participants.length || 0;
 
   els.sessionStatus.textContent = sessionOpen ? "Joining is open" : "Joining is paused";
   els.sessionStatus.className = "session-status " + (sessionOpen ? "open" : "closed");
@@ -319,7 +335,7 @@ function renderSession() {
   if (joined) {
     els.joinHelp.textContent = "You are joined as " + me.name + ". Votes stay hidden until someone reveals them.";
   } else if (sessionOpen) {
-    els.joinHelp.textContent = "Joining is open. Pick a name and hop into the session.";
+    els.joinHelp.textContent = "Joining is open. This room supports up to " + joinLimit + " named participants.";
   } else {
     els.joinHelp.textContent = "Joining is currently disabled for new non-admin participants.";
   }
@@ -340,11 +356,11 @@ function renderSession() {
   els.closeSessionButton.disabled = !appState.connected || !isAdmin || !sessionOpen;
 
   if (!adminAvailable) {
-    els.adminStatus.innerHTML = 'Admin passphrase is not configured on this server.';
+    els.adminStatus.textContent = "Admin access is not configured on this server.";
   } else if (isAdmin) {
-    els.adminStatus.innerHTML = 'Admin mode is enabled for this browser session.';
+    els.adminStatus.textContent = "Admin mode is enabled for this browser session.";
   } else {
-    els.adminStatus.innerHTML = 'Click <strong>Become Admin</strong> to unlock session controls with <code>ADMIN_PASSPHRASE</code>.';
+    els.adminStatus.textContent = session.admin_auth_help || "Use Become Admin to unlock session controls.";
   }
 }
 
@@ -361,7 +377,10 @@ function connect() {
 
   socket.addEventListener("open", () => {
     appState.connected = true;
-    appState.statusLine = "Connected.";; scheduleKeepAlive(); render();
+    appState.statusLine = "Connected.";
+    scheduleKeepAlive();
+    render();
+    maybeClaimCreatorAdmin();
   });
 
   socket.addEventListener("message", (event) => {
@@ -390,6 +409,7 @@ function connect() {
         appState.adminFormVisible = false;
         els.adminPassphraseInput.value = "";
       }
+      maybeClearCreatorClaimToken(message.state.me);
       render();
       return;
     }
@@ -401,6 +421,9 @@ function connect() {
     }
 
     if (message.type === "error") {
+      if (creatorClaimStorageKey && String(message.message || "").toLowerCase().includes("creator admin claim")) {
+        window.sessionStorage.removeItem(creatorClaimStorageKey);
+      }
       setFlash(message.message || "Unknown server error.", "error");
       render();
     }
@@ -408,7 +431,9 @@ function connect() {
 
   socket.addEventListener("close", () => {
     appState.connected = false;
-    appState.statusLine = "Disconnected. Attempting to reconnect...";; cancelKeepAlive(); render();
+    appState.statusLine = "Disconnected. Attempting to reconnect...";
+    cancelKeepAlive();
+    render();
     window.setTimeout(connect, 1200);
   });
 

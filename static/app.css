@@ -40,11 +40,19 @@ body {
   margin: 0 auto;
 }
 
+.page-narrow {
+  width: min(760px, 100%);
+}
+
 .page-header {
   display: flex;
   align-items: center;
   gap: 24px;
   padding: 0 0 20px;
+}
+
+.page-header-stack {
+  justify-content: space-between;
 }
 
 .title-group {
@@ -165,6 +173,12 @@ body {
   color: var(--muted);
 }
 
+.panel h1 {
+  margin: 0 0 14px;
+  font-size: clamp(2rem, 3vw, 2.8rem);
+  line-height: 1.08;
+}
+
 .session-status.open {
   color: var(--good);
 }
@@ -205,6 +219,59 @@ body {
   grid-template-columns: minmax(300px, 340px) minmax(0, 1fr);
   gap: 22px;
   align-items: start;
+}
+
+.hero-panel,
+.setup-panel {
+  padding: 34px;
+}
+
+.hero-copy {
+  margin: 0 0 22px;
+  color: var(--muted);
+  font-size: 1rem;
+  line-height: 1.65;
+}
+
+.hero-card-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.link-card {
+  display: grid;
+  gap: 8px;
+  padding: 18px;
+  border-radius: 22px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  text-decoration: none;
+  transition: transform 180ms ease, border-color 180ms ease, background 180ms ease;
+}
+
+.link-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(255, 159, 67, 0.45);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.link-card strong {
+  font-size: 1.05rem;
+}
+
+.link-card span:last-child {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.link-card-eyebrow {
+  color: var(--accent);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
 }
 
 .panel {
@@ -273,6 +340,33 @@ button:hover:enabled {
 button:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+}
+
+.button-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 12px 18px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  text-decoration: none;
+  transition: transform 180ms ease, border-color 180ms ease, background 180ms ease;
+}
+
+.button-link:hover {
+  transform: translateY(-1px);
+  border-color: rgba(255, 159, 67, 0.38);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.button-link-solid {
+  border-color: rgba(255, 159, 67, 0.45);
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
+  color: #08111f;
+  font-weight: 700;
 }
 
 .button-secondary {
@@ -627,6 +721,10 @@ button:disabled {
   .page {
     display: grid;
     gap: 18px;
+  }
+
+  .hero-card-grid {
+    grid-template-columns: 1fr;
   }
 }
 

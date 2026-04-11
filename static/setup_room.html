@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Setup Room</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+
+<body>
+  <div class="page page-narrow">
+    <header class="page-header page-header-stack">
+      <div class="title-group">
+        <span class="page-title">Sprint Poker</span>
+        <span class="instance-badge">Setup Room</span>
+      </div>
+      <div class="header-badges">
+        <a class="powered-by github-link" href="https://github.com/MikiEEE/SmallOS/tree/master" target="_blank"
+          rel="noreferrer">Powered by SmallOS</a>
+      </div>
+    </header>
+
+    <section class="panel setup-panel">
+      <h1>Create a private room</h1>
+      <p class="hero-copy">
+        Your room opens immediately, supports up to 8 named participants, and expires after two hours.
+        The one-hour inactivity timeout still applies.
+      </p>
+
+      <form id="setupRoomForm" class="join-form">
+        <label class="field-label" for="roomAdminPassphrase">Room admin password</label>
+        <input id="roomAdminPassphrase" type="password" maxlength="128" autocomplete="new-password"
+          placeholder="Choose a room password">
+
+        <label class="field-label" for="roomAdminPassphraseConfirm">Confirm password</label>
+        <input id="roomAdminPassphraseConfirm" type="password" maxlength="128" autocomplete="new-password"
+          placeholder="Re-enter the room password">
+
+        <div class="button-row">
+          <button type="submit" id="createRoomButton">Create Room</button>
+          <a class="button-link" href="/">Back</a>
+        </div>
+      </form>
+
+      <div id="setupRoomStatus" class="notice-strip"></div>
+    </section>
+  </div>
+
+  <script src="/static/setup_room.js" defer></script>
+</body>
+
+</html>
