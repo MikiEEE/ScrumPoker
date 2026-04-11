@@ -1,6 +1,5 @@
 """Shared helpers and state utilities for the SmallOS scrum poker app."""
 
-from collections import deque
 import hmac
 import json
 import os
@@ -22,12 +21,15 @@ HEADER_READ_TIMEOUT_SECONDS = 10  # close slow-loris connections after this many
 MAX_FRAME_SIZE = 64 * 1024
 MAX_MESSAGE_SIZE = 256 * 1024
 OUTBOX_SIGNAL = 9
-MAX_PARTICIPANTS = 50
-MAX_CONNECTIONS = 200  # total concurrent WebSocket transports (joined + anonymous)
+PREMIUM_JOIN_LIMIT = 20
+EPHEMERAL_JOIN_LIMIT = 8
+EPHEMERAL_ROOM_LIMIT = 19
+EPHEMERAL_ROOM_TTL_SECONDS = 2 * 60 * 60
+MAX_PARTICIPANTS = PREMIUM_JOIN_LIMIT  # legacy default kept for callers that do not pass a room limit
+MAX_CONNECTIONS = 320  # default global transport cap across every active room
 MAX_ADMIN_FAILURES = 5  # per-connection lockout after this many wrong passphrase guesses
 MESSAGE_RATE_LIMIT_MS = 50  # minimum ms between processed messages per connection (~20/sec)
 MESSAGE_RATE_BURST = 100  # disconnect after this many back-to-back throttled messages
-MAX_PENDING_AUX_MESSAGES = 8  # non-state messages queued for one connection before it is disconnected
 ALLOWED_VOTES = (
     "0",
     "0.5",
@@ -50,12 +52,7 @@ CONFIG_PATH = os.path.join(SMALLOS_ROOT, "smallos.config.json")
 DOTENV_PATH = os.path.join(PROJECT_ROOT, ".env")
 STATIC_DIR = os.path.join(PROJECT_ROOT, "static")
 SESSION_RESUME_GRACE_SECONDS = 45  # how long a disconnected participant's slot is held before they're removed from the board
-IDLE_TIMEOUT_SECONDS = 3600  # 1 hour of no activity kicks and closes the session
-STATIC_ASSETS = {
-    "/": ("index.html", "text/html; charset=utf-8"),
-    "/static/app.css": ("app.css", "text/css; charset=utf-8"),
-    "/static/app.js": ("app.js", "application/javascript; charset=utf-8"),
-}
+IDLE_TIMEOUT_SECONDS = 3600  # 1 hour of no activity clears the premium room and destroys ephemeral rooms
 
 
 def _http_reason(status_code):
@@ -63,6 +60,7 @@ def _http_reason(status_code):
     reasons = {
         101: "Switching Protocols",
         200: "OK",
+        201: "Created",
         400: "Bad Request",
         403: "Forbidden",
         404: "Not Found",
@@ -172,8 +170,18 @@ _load_dotenv_file()
 
 
 def _get_admin_passphrase():
-    """Return the currently configured admin passphrase."""
+    """Return the legacy global admin passphrase."""
     return os.environ.get("ADMIN_PASSPHRASE", "").strip()
+
+
+def _get_legalease_admin_passphrase():
+    """Return the premium Legalease admin passphrase."""
+    return os.environ.get("LEGALEASE_ADMIN_PASSPHRASE", "").strip() or _get_admin_passphrase()
+
+
+def _get_super_user_passphrase():
+    """Return the super-user passphrase valid in every room."""
+    return os.environ.get("SUPER_USER_PASSPHRASE", "").strip()
 
 
 def _get_host():
@@ -193,9 +201,14 @@ def _get_port():
     return port
 
 
-def _admin_auth_enabled():
-    """Report whether browser-side admin elevation is configured."""
-    return bool(_get_admin_passphrase())
+def _get_max_connections():
+    """Return the configured global WebSocket transport cap."""
+    raw_value = str(os.environ.get("MAX_CONNECTIONS", MAX_CONNECTIONS)).strip()
+    try:
+        limit = int(raw_value)
+    except (TypeError, ValueError):
+        return MAX_CONNECTIONS
+    return max(1, limit)
 
 
 def _read_static_asset(filename):
@@ -205,45 +218,44 @@ def _read_static_asset(filename):
         return asset_file.read()
 
 
-def _static_asset_response(path):
-    """Build an HTTP response for one known static asset path."""
-    asset = STATIC_ASSETS.get(path)
-    if asset is None:
-        return None
-
-    filename, content_type = asset
-    try:
-        body = _read_static_asset(filename)
-    except OSError:
-        return _http_response(500, "static asset unavailable\n")
-    return _http_response(200, body, content_type)
-
-
-def _new_state(runtime):
-    """Return the shared in-memory scrum poker session state."""
+def _new_state(
+    runtime,
+    room_id="room",
+    room_kind="premium",
+    join_limit=MAX_PARTICIPANTS,
+    admin_auth_mode="premium",
+    room_admin_passphrase=None,
+    created_ms=None,
+    expires_at_ms=None,
+    label="",
+    creator_claim_token=None,
+):
+    """Return the shared in-memory scrum poker session state for one room."""
     now = runtime.kernel.scheduler_now_ms()
+    created_at = now if created_ms is None else created_ms
     return {
-        "kernel": runtime.kernel,
-        "listener": None,
-        "os": runtime,
-        "started_ms": now,
-        "last_activity_ms": now,
-        "session_open": False,
-        "votes_visible": False,
-        "next_connection_id": 1,
+        "admin_auth_mode": admin_auth_mode,
         "connections": {},
         "connections_by_token": {},
-        "state_version": 0,
-        "shared_state_cache_version": None,
-        "shared_state_cache": None,
-        "shared_state_message_cache_version": None,
-        "shared_state_message_cache": None,
-        "stats": {
-            "broadcasts": 0,
-            "shared_state_rebuilds": 0,
-            "dropped_state_updates": 0,
-            "queue_disconnects": 0,
-        },
+        "created_ms": created_at,
+        "creator_claim_token": creator_claim_token,
+        "creator_claim_used": False,
+        "destroy_reason": None,
+        "destroyed": False,
+        "expires_at_ms": expires_at_ms,
+        "join_limit": int(join_limit),
+        "kernel": runtime.kernel,
+        "label": label,
+        "last_activity_ms": created_at,
+        "listener": None,
+        "next_connection_id": 1,
+        "os": runtime,
+        "room_admin_passphrase": room_admin_passphrase,
+        "room_id": room_id,
+        "room_kind": room_kind,
+        "session_open": False,
+        "started_ms": created_at,
+        "votes_visible": False,
     }
 
 
@@ -303,13 +315,9 @@ def _shutdown_state(runtime, state):
     state["listener"] = None
 
     for connection in list(state.get("connections", {}).values()):
-        _ensure_connection_queue_fields(connection)
         connection["connected"] = False
         connection["shutdown_after_drain"] = True
         connection["websocket"] = None
-        connection["pending_shared_state_text"] = None
-        connection["pending_viewer_state_text"] = None
-        connection["pending_messages"].clear()
         _close_socket_quietly(kernel, connection.get("socket"))
         connection["socket"] = None
 
@@ -371,6 +379,14 @@ def _normalize_tab_id(value):
     return tab_id
 
 
+def _normalize_admin_passphrase(value):
+    """Normalize one room admin passphrase."""
+    text = str("" if value is None else value).strip()
+    if not text or len(text) > 128:
+        return None
+    return text
+
+
 def _now_ms(state):
     """Return the scheduler clock used for reconnect grace periods."""
     kernel = state.get("kernel")
@@ -384,46 +400,51 @@ def _touch_activity(state):
     state["last_activity_ms"] = _now_ms(state)
 
 
-def _mark_state_dirty(state):
-    """Invalidate cached shared state after one meaningful board change."""
-    state["state_version"] = int(state.get("state_version", 0)) + 1
-    state["shared_state_cache_version"] = None
-    state["shared_state_cache"] = None
-    state["shared_state_message_cache_version"] = None
-    state["shared_state_message_cache"] = None
-    return state["state_version"]
+def _room_has_expired(state, now_ms=None):
+    """Return whether one room has passed its hard expiry time."""
+    expires_at_ms = state.get("expires_at_ms")
+    if expires_at_ms is None:
+        return False
+    current_ms = _now_ms(state) if now_ms is None else now_ms
+    return current_ms >= expires_at_ms
 
 
-def _mark_connection_viewer_dirty(connection):
-    """Mark a connection's viewer-specific state as needing a refresh."""
-    connection["viewer_state_dirty"] = True
+def _room_admin_passphrases(state):
+    """Return every passphrase that can unlock admin for one room."""
+    passphrases = []
+
+    if state.get("room_kind") == "premium":
+        premium_passphrase = _get_legalease_admin_passphrase()
+        if premium_passphrase:
+            passphrases.append(premium_passphrase)
+    else:
+        room_passphrase = state.get("room_admin_passphrase")
+        if room_passphrase:
+            passphrases.append(room_passphrase)
+
+    super_user_passphrase = _get_super_user_passphrase()
+    if super_user_passphrase and super_user_passphrase not in passphrases:
+        passphrases.append(super_user_passphrase)
+
+    return passphrases
 
 
-def _ensure_connection_queue_fields(connection):
-    """Backfill queue-related connection fields for newer bounded queues."""
-    if connection is None:
-        return
+def _admin_auth_enabled(state):
+    """Report whether browser-side admin elevation is configured for one room."""
+    return bool(_room_admin_passphrases(state))
 
-    if "pending_messages" not in connection or connection["pending_messages"] is None:
-        legacy_messages = connection.get("outbox", [])
-        connection["pending_messages"] = deque(legacy_messages)
-    elif not isinstance(connection["pending_messages"], deque):
-        connection["pending_messages"] = deque(connection["pending_messages"])
 
-    if "pending_shared_state_text" not in connection:
-        connection["pending_shared_state_text"] = None
-    if "pending_viewer_state_text" not in connection:
-        connection["pending_viewer_state_text"] = None
-    if "dropped_state_updates" not in connection:
-        connection["dropped_state_updates"] = 0
-    if "disconnect_reason" not in connection:
-        connection["disconnect_reason"] = None
-    if "viewer_state_dirty" not in connection:
-        connection["viewer_state_dirty"] = True
-    if "last_msg_ms" not in connection:
-        connection["last_msg_ms"] = 0
-    if "rate_burst" not in connection:
-        connection["rate_burst"] = 0
+def _admin_auth_help(state):
+    """Return the user-facing help text for the current room's admin flow."""
+    if not _admin_auth_enabled(state):
+        return "Admin access is not configured on this server."
+    if state.get("room_kind") == "premium":
+        if _get_super_user_passphrase():
+            return "Use the Legalease admin password or the super-user password to unlock session controls."
+        return "Use the Legalease admin password to unlock session controls."
+    if _get_super_user_passphrase():
+        return "Use the room admin password or the super-user password to unlock session controls."
+    return "Use the room admin password to unlock session controls."
 
 
 def _connected_count(state):
@@ -458,29 +479,21 @@ def _remove_connection_record(state, connection):
 def _expire_stale_connections(state):
     """Drop disconnected participant records once their resume window expires."""
     now_ms = _now_ms(state)
-    removed_any = False
-
     for connection in list(state.get("connections", {}).values()):
         if connection.get("closed"):
             _remove_connection_record(state, connection)
-            removed_any = True
             continue
-
         deadline = connection.get("resume_deadline_ms")
         if connection.get("connected", True) or deadline is None:
             continue
         if now_ms >= deadline:
             _remove_connection_record(state, connection)
-            removed_any = True
-
-    if removed_any:
-        _mark_state_dirty(state)
 
 
 def _connections_over_hard_cap(state):
     """Return True when the total connection record count is at the hard cap."""
     _expire_stale_connections(state)
-    return len(state.get("connections", {})) >= MAX_CONNECTIONS * 2
+    return len(state.get("connections", {})) >= _get_max_connections() * 2
 
 
 def _make_connection_record(state, client_addr, session_token=None, tab_id=None):
@@ -490,27 +503,20 @@ def _make_connection_record(state, client_addr, session_token=None, tab_id=None)
 
     record = {
         "addr": str(client_addr),
+        "admin_failures": 0,
         "client_id": client_id,
         "closed": False,
         "connected": False,
-        "disconnect_reason": None,
-        "dropped_state_updates": 0,
         "is_admin": False,
-        "last_msg_ms": 0,
         "name": None,
-        "pending_messages": deque(),
-        "pending_shared_state_text": None,
-        "pending_viewer_state_text": None,
-        "rate_burst": 0,
+        "outbox": [],
         "resume_deadline_ms": None,
         "session_task": None,
         "session_token": session_token or _new_session_token(),
         "shutdown_after_drain": False,
         "socket": None,
-        "state": state,
         "tab_id": tab_id,
         "transport_id": 0,
-        "viewer_state_dirty": True,
         "vote": None,
         "websocket": None,
         "writer_task": None,
@@ -522,7 +528,6 @@ def _make_connection_record(state, client_addr, session_token=None, tab_id=None)
 
 def _attach_connection_transport(task, state, connection, sock, client_addr):
     """Attach the current websocket transport to one participant record."""
-    _ensure_connection_queue_fields(connection)
     os_ref = state.get("os")
     old_session = connection.get("session_task")
     if old_session is not None and old_session is not task and not old_session.done:
@@ -550,20 +555,13 @@ def _attach_connection_transport(task, state, connection, sock, client_addr):
     connection["addr"] = str(client_addr)
     connection["closed"] = False
     connection["connected"] = True
-    connection["disconnect_reason"] = None
-    connection["pending_messages"].clear()
-    connection["pending_shared_state_text"] = None
-    connection["pending_viewer_state_text"] = None
-    connection["rate_burst"] = 0
+    connection["outbox"] = []
     connection["resume_deadline_ms"] = None
     connection["session_task"] = task
     connection["shutdown_after_drain"] = False
     connection["socket"] = sock
-    connection["state"] = state
     connection["transport_id"] = int(connection.get("transport_id", 0)) + 1
     connection["websocket"] = None
-    _mark_connection_viewer_dirty(connection)
-    _mark_state_dirty(state)
 
     writer_task = task.spawn(
         websocket_writer_task,
@@ -612,89 +610,61 @@ def _iter_participants(state):
     return joined
 
 
-def _build_viewer_state(state, viewer_id=None):
-    """Build the viewer-specific payload for one connection."""
-    viewer = state.get("connections", {}).get(viewer_id)
-    if viewer is None or viewer.get("closed"):
-        return None
-    return {
-        "client_id": viewer["client_id"],
-        "is_admin": bool(viewer.get("is_admin")),
-        "name": viewer.get("name"),
-        "session_token": viewer.get("session_token"),
-        "vote": viewer.get("vote"),
-    }
-
-
-def _build_shared_state(state):
-    """Build or reuse the cached room-wide state snapshot."""
+def _build_public_state(state, viewer_id=None):
+    """Build the browser-visible session snapshot for one connection."""
     _expire_stale_connections(state)
-    version = state.get("state_version", 0)
-    if state.get("shared_state_cache_version") == version and state.get("shared_state_cache") is not None:
-        return state["shared_state_cache"]
-
     participants = []
-    votes_visible = bool(state["votes_visible"])
+    viewer = state["connections"].get(viewer_id)
 
     for connection in _iter_participants(state):
-        vote_value = connection.get("vote") if votes_visible else None
+        is_self = connection["client_id"] == viewer_id
+        vote_value = connection.get("vote")
+        if not state["votes_visible"] and not is_self:
+            vote_value = None
+
         participants.append(
             {
                 "client_id": connection["client_id"],
                 "has_voted": connection.get("vote") is not None,
                 "is_admin": bool(connection.get("is_admin")),
                 "is_connected": bool(connection.get("connected", True)),
+                "is_self": is_self,
                 "name": connection["name"],
                 "vote": vote_value,
             }
         )
 
-    shared_state = {
-        "admin_auth_enabled": _admin_auth_enabled(),
+    return {
+        "admin_auth_enabled": _admin_auth_enabled(state),
+        "admin_auth_help": _admin_auth_help(state),
         "connected_count": _connected_count(state),
+        "join_limit": int(state.get("join_limit", MAX_PARTICIPANTS)),
+        "me": (
+            {
+                "client_id": viewer["client_id"],
+                "is_admin": bool(viewer.get("is_admin")),
+                "name": viewer.get("name"),
+                "session_token": viewer.get("session_token"),
+                "vote": viewer.get("vote"),
+            }
+            if viewer is not None
+            else None
+        ),
         "participant_count": len(participants),
         "participants": participants,
+        "room_expires_at_ms": state.get("expires_at_ms"),
+        "room_id": state.get("room_id"),
+        "room_kind": state.get("room_kind"),
+        "room_label": state.get("label") or "",
         "server_time": datetime.now(timezone.utc).strftime("%H:%M:%SZ"),
         "session_open": bool(state["session_open"]),
-        "state_version": version,
         "vote_options": list(ALLOWED_VOTES),
-        "votes_visible": votes_visible,
+        "votes_visible": bool(state["votes_visible"]),
     }
-    state["shared_state_cache_version"] = version
-    state["shared_state_cache"] = shared_state
-    state["stats"]["shared_state_rebuilds"] += 1
-    return shared_state
-
-
-def _build_public_state(state, viewer_id=None):
-    """Build the browser-visible session snapshot for one connection."""
-    shared_state = dict(_build_shared_state(state))
-    shared_state["me"] = _build_viewer_state(state, viewer_id)
-    return shared_state
-
-
-def _build_shared_state_message(state):
-    """Encode the room-wide websocket payload once per state version."""
-    shared_state = _build_shared_state(state)
-    version = shared_state["state_version"]
-    if state.get("shared_state_message_cache_version") == version and state.get("shared_state_message_cache") is not None:
-        return state["shared_state_message_cache"]
-
-    message = _json_text({"clear_error": True, "state": shared_state, "type": "state"})
-    state["shared_state_message_cache_version"] = version
-    state["shared_state_message_cache"] = message
-    return message
-
-
-def _build_viewer_state_message(connection):
-    """Encode one viewer-specific websocket payload."""
-    state = connection.get("state")
-    viewer_state = _build_viewer_state(state, connection.get("client_id")) if state is not None else None
-    return _json_text({"me": viewer_state, "type": "viewer_state"})
 
 
 def _build_state_message(state, viewer_id=None):
-    """Encode one compatibility websocket payload with combined state."""
+    """Encode one personalized websocket state payload."""
     return _json_text(
         {
             "clear_error": True,
@@ -704,71 +674,21 @@ def _build_state_message(state, viewer_id=None):
     )
 
 
-def _signal_writer(connection):
-    """Wake a connection writer task when queued work is available."""
+def _queue_connection_text(connection, text):
+    """Append one text message to a connection outbox and wake its writer."""
+    if connection.get("closed") or not connection.get("connected", True):
+        return
+    connection["outbox"].append(text)
     writer_task = connection.get("writer_task")
     if writer_task is not None and not writer_task.done:
         writer_task.acceptSignal(OUTBOX_SIGNAL)
 
 
-def _request_backpressure_disconnect(state, connection, reason="client fell behind"):
-    """Disconnect one slow client after exhausting state coalescing."""
-    if state is not None:
-        state["stats"]["queue_disconnects"] += 1
-    connection["disconnect_reason"] = reason
-    _kick_connection(state, connection)
-
-
-def _queue_state_update(connection, shared_state_text, viewer_state_text=None):
-    """Coalesce the latest state payload for one connection."""
-    _ensure_connection_queue_fields(connection)
-    if connection.get("closed") or not connection.get("connected", True):
-        return
-
-    state = connection.get("state")
-    if connection.get("pending_shared_state_text") is not None or (
-        viewer_state_text is not None and connection.get("pending_viewer_state_text") is not None
-    ):
-        connection["dropped_state_updates"] = int(connection.get("dropped_state_updates", 0)) + 1
-        if state is not None:
-            state["stats"]["dropped_state_updates"] += 1
-
-    connection["pending_shared_state_text"] = shared_state_text
-    if viewer_state_text is not None:
-        connection["pending_viewer_state_text"] = viewer_state_text
-    _signal_writer(connection)
-
-
-def _queue_connection_text(connection, text):
-    """Append one non-state message to a bounded queue and wake its writer."""
-    _ensure_connection_queue_fields(connection)
-    if connection.get("closed") or not connection.get("connected", True):
-        return
-
-    state = connection.get("state")
-    pending_messages = connection["pending_messages"]
-    if len(pending_messages) >= MAX_PENDING_AUX_MESSAGES:
-        _request_backpressure_disconnect(state, connection)
-        return
-
-    pending_messages.append(text)
-    _signal_writer(connection)
-
-
 def _broadcast_state(state):
-    """Queue the latest shared state, plus dirty viewer state, for every live client."""
+    """Queue a fresh state snapshot for every connected websocket client."""
     _expire_stale_connections(state)
-    state["stats"]["broadcasts"] += 1
-    shared_state_text = _build_shared_state_message(state)
-
     for connection in list(state["connections"].values()):
-        if connection.get("closed") or not connection.get("connected", True):
-            continue
-        viewer_state_text = None
-        if connection.get("viewer_state_dirty"):
-            viewer_state_text = _build_viewer_state_message(connection)
-            connection["viewer_state_dirty"] = False
-        _queue_state_update(connection, shared_state_text, viewer_state_text=viewer_state_text)
+        _queue_connection_text(connection, _build_state_message(state, connection["client_id"]))
 
 
 def _queue_error(connection, message):
@@ -786,26 +706,14 @@ def _queue_notice(connection, message, kind="info"):
 
 def _clear_votes(state):
     """Discard all active votes and collapse the board back to hidden mode."""
-    changed = bool(state.get("votes_visible"))
     for connection in state["connections"].values():
-        if connection.get("vote") is not None:
-            changed = True
-            connection["vote"] = None
-            _mark_connection_viewer_dirty(connection)
+        connection["vote"] = None
     state["votes_visible"] = False
-    if changed:
-        _mark_state_dirty(state)
-    return changed
 
 
 def _set_session_open(state, is_open):
     """Update whether new participants may join the session."""
-    desired_state = bool(is_open)
-    if state.get("session_open") == desired_state:
-        return False
-    state["session_open"] = desired_state
-    _mark_state_dirty(state)
-    return True
+    state["session_open"] = bool(is_open)
 
 
 def _parse_client_id(value):
@@ -816,13 +724,12 @@ def _parse_client_id(value):
         return None
 
 
-def _kick_connection(state, target_connection, mark_dirty=True):
+def _kick_connection(state, target_connection):
     """Disconnect one websocket client and remove it from the shared state."""
     if target_connection is None:
         return
 
-    _ensure_connection_queue_fields(target_connection)
-    os_ref = state.get("os") if state is not None else None
+    os_ref = state.get("os")
     session_task = target_connection.get("session_task")
     if session_task is not None and not session_task.done and os_ref is not None:
         try:
@@ -833,13 +740,10 @@ def _kick_connection(state, target_connection, mark_dirty=True):
     target_connection["connected"] = False
     target_connection["closed"] = True
     target_connection["shutdown_after_drain"] = True
-    target_connection["pending_shared_state_text"] = None
-    target_connection["pending_viewer_state_text"] = None
-    target_connection["pending_messages"].clear()
+    target_connection["outbox"] = []
     target_connection["websocket"] = None
     target_connection["session_task"] = None
-    if state is not None:
-        _remove_connection_record(state, target_connection)
+    _remove_connection_record(state, target_connection)
 
     writer_task = target_connection.get("writer_task")
     if writer_task is not None and not writer_task.done:
@@ -847,42 +751,59 @@ def _kick_connection(state, target_connection, mark_dirty=True):
             try:
                 os_ref.cancel_task(writer_task)
             except Exception:
-                _signal_writer(target_connection)
+                writer_task.acceptSignal(OUTBOX_SIGNAL)
         else:
-            _signal_writer(target_connection)
+            writer_task.acceptSignal(OUTBOX_SIGNAL)
 
     socket_obj = target_connection.get("socket")
-    kernel = state.get("kernel") if state is not None else None
+    kernel = state.get("kernel")
     target_connection["socket"] = None
-    if socket_obj is not None:
-        try:
-            if kernel is not None:
-                kernel.socket_close(socket_obj)
-            else:
-                socket_obj.close()
-        except Exception:
-            pass
+    if socket_obj is None:
+        return
 
-    if state is not None and mark_dirty:
-        _mark_state_dirty(state)
+    try:
+        if kernel is not None:
+            kernel.socket_close(socket_obj)
+        else:
+            socket_obj.close()
+    except Exception:
+        pass
 
 
 def _clear_everyone(state):
     """Kick every participant off the board and close the session."""
     participants = list(state.get("connections", {}).values())
-    had_state = bool(participants) or bool(state.get("session_open")) or bool(state.get("votes_visible"))
     for connection in participants:
-        _kick_connection(state, connection, mark_dirty=False)
+        _kick_connection(state, connection)
     state["session_open"] = False
     state["votes_visible"] = False
     _touch_activity(state)
-    if had_state:
-        _mark_state_dirty(state)
     return len(participants)
+
+
+def _claim_creator_admin(state, connection, token):
+    """Promote one browser session to admin using a one-time creator token."""
+    expected = state.get("creator_claim_token")
+    if state.get("creator_claim_used") or not expected:
+        return "creator admin claim is no longer available"
+
+    supplied = _normalize_session_token(token)
+    if supplied is None or not hmac.compare_digest(supplied.encode(), expected.encode()):
+        return "creator admin claim token is invalid or expired"
+
+    state["creator_claim_used"] = True
+    state["creator_claim_token"] = None
+    connection["is_admin"] = True
+    _queue_notice(connection, "Creator admin access granted.", kind="success")
+    return None
 
 
 def _apply_client_message(state, connection, payload):
     """Apply one parsed client websocket message to the shared state."""
+    if state.get("destroyed"):
+        return "this room is no longer available"
+    if _room_has_expired(state):
+        return "this room has expired"
     if not isinstance(payload, dict):
         return "messages must be JSON objects"
 
@@ -894,30 +815,39 @@ def _apply_client_message(state, connection, payload):
             return "names must be between 1 and 32 characters"
         if not state["session_open"] and not connection.get("name") and not connection.get("is_admin"):
             return "joining is currently disabled by the administrator"
-        if not connection.get("name") and not connection.get("is_admin") and _joined_count(state) >= MAX_PARTICIPANTS:
-            return "this session is full (max {} participants)".format(MAX_PARTICIPANTS)
+        if not connection.get("name") and not connection.get("is_admin") and _joined_count(state) >= state.get("join_limit", MAX_PARTICIPANTS):
+            return "this session is full (max {} participants)".format(state.get("join_limit", MAX_PARTICIPANTS))
         connection["name"] = name
-        _mark_connection_viewer_dirty(connection)
-        _mark_state_dirty(state)
         _touch_activity(state)
         return None
 
+    if message_type == "claim_creator_admin":
+        token = payload.get("token")
+        result = _claim_creator_admin(state, connection, token)
+        if result is None:
+            _touch_activity(state)
+        return result
+
     if message_type == "become_admin":
-        expected = _get_admin_passphrase()
-        if not expected:
+        expected_passphrases = _room_admin_passphrases(state)
+        if not expected_passphrases:
             return "admin access is not configured on this server"
         failures = connection.get("admin_failures", 0)
         if failures >= MAX_ADMIN_FAILURES:
             return "too many failed attempts — reconnect to try again"
         supplied = str("" if payload.get("passphrase") is None else payload.get("passphrase"))
-        if not hmac.compare_digest(supplied.encode(), expected.encode()):
+        matched = False
+        for expected in expected_passphrases:
+            if hmac.compare_digest(supplied.encode(), expected.encode()):
+                matched = True
+                break
+        if not matched:
             connection["admin_failures"] = failures + 1
             return "incorrect admin passphrase"
         connection["admin_failures"] = 0
         connection["is_admin"] = True
-        _mark_connection_viewer_dirty(connection)
-        _mark_state_dirty(state)
         _queue_notice(connection, "Admin access granted.", kind="success")
+        _touch_activity(state)
         return None
 
     if message_type == "vote":
@@ -927,8 +857,6 @@ def _apply_client_message(state, connection, payload):
         if vote is None:
             return "unsupported vote value"
         connection["vote"] = vote
-        _mark_connection_viewer_dirty(connection)
-        _mark_state_dirty(state)
         _touch_activity(state)
         return None
 
@@ -936,25 +864,20 @@ def _apply_client_message(state, connection, payload):
         if not connection.get("name") and not connection.get("is_admin"):
             return "join the session before revealing votes"
         state["votes_visible"] = not state["votes_visible"]
-        _mark_state_dirty(state)
         _touch_activity(state)
         return None
 
     if message_type == "show_votes":
         if not connection.get("name") and not connection.get("is_admin"):
             return "join the session before revealing votes"
-        if not state.get("votes_visible"):
-            state["votes_visible"] = True
-            _mark_state_dirty(state)
+        state["votes_visible"] = True
         _touch_activity(state)
         return None
 
     if message_type == "hide_votes":
         if not connection.get("name") and not connection.get("is_admin"):
             return "join the session before hiding votes"
-        if state.get("votes_visible"):
-            state["votes_visible"] = False
-            _mark_state_dirty(state)
+        state["votes_visible"] = False
         _touch_activity(state)
         return None
 
@@ -1113,33 +1036,16 @@ def _parse_request_target(target):
 
 
 async def websocket_writer_task(task, connection):
-    """Serialize writes for one websocket client connection with bounded queues."""
+    """Serialize all writes for one websocket client connection."""
     websocket = connection["websocket"]
-    _ensure_connection_queue_fields(connection)
 
     try:
         while True:
-            while connection.get("pending_shared_state_text") is not None:
-                message = connection["pending_shared_state_text"]
-                connection["pending_shared_state_text"] = None
-                await websocket.send_text(message)
-
-            while connection.get("pending_viewer_state_text") is not None:
-                message = connection["pending_viewer_state_text"]
-                connection["pending_viewer_state_text"] = None
-                await websocket.send_text(message)
-
-            while connection["pending_messages"]:
-                message = connection["pending_messages"].popleft()
+            while connection["outbox"]:
+                message = connection["outbox"].pop(0)
                 await websocket.send_text(message)
 
             if connection.get("shutdown_after_drain"):
-                reason = connection.get("disconnect_reason") or ""
-                if getattr(websocket, "connected", False):
-                    try:
-                        await websocket.send_close(code=1001, reason=reason[:120])
-                    except Exception:
-                        pass
                 return "writer stopped"
 
             await task.wait_signal(OUTBOX_SIGNAL)
@@ -1155,6 +1061,9 @@ __all__ = [
     "DEFAULT_HOST",
     "DEFAULT_PORT",
     "DOTENV_PATH",
+    "EPHEMERAL_JOIN_LIMIT",
+    "EPHEMERAL_ROOM_LIMIT",
+    "EPHEMERAL_ROOM_TTL_SECONDS",
     "HEADER_READ_TIMEOUT_SECONDS",
     "IDLE_TIMEOUT_SECONDS",
     "LISTEN_BACKLOG",
@@ -1163,38 +1072,37 @@ __all__ = [
     "MAX_FRAME_SIZE",
     "MAX_MESSAGE_SIZE",
     "MAX_PARTICIPANTS",
-    "MAX_PENDING_AUX_MESSAGES",
     "MESSAGE_RATE_BURST",
     "MESSAGE_RATE_LIMIT_MS",
     "OUTBOX_SIGNAL",
+    "PREMIUM_JOIN_LIMIT",
     "PROJECT_ROOT",
     "REQUEST_HEADER_LIMIT",
     "SESSION_RESUME_GRACE_SECONDS",
     "SMALLOS_ROOT",
-    "STATIC_ASSETS",
     "STATIC_DIR",
     "_admin_auth_enabled",
+    "_admin_auth_help",
     "_apply_client_message",
     "_attach_connection_transport",
     "_broadcast_state",
     "_build_public_state",
     "_build_route",
     "_build_runtime",
-    "_build_shared_state",
-    "_build_shared_state_message",
     "_build_state_message",
-    "_build_viewer_state",
-    "_build_viewer_state_message",
     "_clear_everyone",
     "_clear_votes",
+    "_claim_creator_admin",
     "_close_socket_quietly",
     "_connected_count",
     "_connections_over_hard_cap",
-    "_ensure_connection_queue_fields",
     "_expire_stale_connections",
     "_get_admin_passphrase",
     "_get_host",
+    "_get_legalease_admin_passphrase",
+    "_get_max_connections",
     "_get_port",
+    "_get_super_user_passphrase",
     "_http_reason",
     "_http_response",
     "_iter_participants",
@@ -1204,10 +1112,9 @@ __all__ = [
     "_kick_connection",
     "_load_dotenv_file",
     "_make_connection_record",
-    "_mark_connection_viewer_dirty",
-    "_mark_state_dirty",
     "_new_session_token",
     "_new_state",
+    "_normalize_admin_passphrase",
     "_normalize_base_path",
     "_normalize_name",
     "_normalize_session_token",
@@ -1222,19 +1129,17 @@ __all__ = [
     "_queue_connection_text",
     "_queue_error",
     "_queue_notice",
-    "_queue_state_update",
     "_read_exact",
     "_read_request_head",
     "_read_static_asset",
     "_remove_connection_record",
-    "_request_backpressure_disconnect",
     "_resolve_connection_for_socket",
+    "_room_admin_passphrases",
+    "_room_has_expired",
     "_send_all",
     "_set_session_open",
     "_shutdown_runtime",
     "_shutdown_state",
-    "_signal_writer",
-    "_static_asset_response",
     "_strip_dotenv_comment",
     "_touch_activity",
     "websocket_writer_task",

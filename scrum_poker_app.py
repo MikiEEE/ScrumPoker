@@ -1,4 +1,4 @@
-"""Mounted scrum poker board implementation."""
+"""Mounted scrum poker room implementation."""
 
 import html
 import json
@@ -9,10 +9,11 @@ from SmallOS.SmallPackage.SmallErrors import TaskCancelledError
 
 from smallos_websocket_server import SmallWebSocketServerConnection, WebSocketServerProtocolError
 from scrum_poker_core import (
+    EPHEMERAL_ROOM_TTL_SECONDS,
     IDLE_TIMEOUT_SECONDS,
-    MAX_CONNECTIONS,
     MAX_FRAME_SIZE,
     MAX_MESSAGE_SIZE,
+    MAX_PARTICIPANTS,
     MESSAGE_RATE_BURST,
     MESSAGE_RATE_LIMIT_MS,
     OUTBOX_SIGNAL,
@@ -25,55 +26,98 @@ from scrum_poker_core import (
     _connected_count,
     _connections_over_hard_cap,
     _expire_stale_connections,
+    _get_max_connections,
     _http_response,
     _json_bytes,
-    _mark_state_dirty,
     _new_state,
     _normalize_base_path,
     _now_ms,
     _parse_request_target,
     _path_matches_base,
     _queue_error,
-    _queue_notice,
     _read_static_asset,
     _resolve_connection_for_socket,
+    _room_has_expired,
     _send_all,
     _shutdown_state,
 )
 
 
 async def idle_watchdog_task(task, app):
-    """Kick everyone and close the session after IDLE_TIMEOUT_SECONDS of no activity."""
+    """Handle idle cleanup for one room."""
     check_interval = 60
     state = app.state
     while True:
         await task.sleep(check_interval)
+        if state.get("destroyed"):
+            return
+
         idle_ms = _now_ms(state) - state.get("last_activity_ms", _now_ms(state))
         if idle_ms < IDLE_TIMEOUT_SECONDS * 1000:
             continue
 
+        if app.room_kind == "ephemeral":
+            task.OS.print("[scrum-poker:{}] idle timeout reached - destroying ephemeral room\n".format(app.app_id))
+            if app.host is not None:
+                app.host.destroy_ephemeral_room(app.room_id, reason="idle-timeout", current_task=task)
+            return
+
         task.OS.print("[scrum-poker:{}] idle timeout reached - kicking all participants\n".format(app.app_id))
-        for connection in list(state.get("connections", {}).values()):
-            if connection.get("connected") and connection.get("name"):
-                _queue_notice(connection, "Session closed due to inactivity.", kind="error")
-        await task.sleep(1)
         _clear_everyone(state)
         app.broadcast_state()
         task.OS.print("[scrum-poker:{}] session closed after idle timeout\n".format(app.app_id))
 
 
 class ScrumPokerApp:
-    """One isolated scrum poker board mounted at a specific base path."""
+    """One isolated scrum poker room mounted at a specific base path."""
 
-    def __init__(self, app_id, base_path, runtime, title=None, label=None):
-        self.app_id = str(app_id).strip() or "app"
+    def __init__(
+        self,
+        app_id,
+        base_path,
+        runtime,
+        title=None,
+        label=None,
+        host=None,
+        room_kind="premium",
+        join_limit=MAX_PARTICIPANTS,
+        admin_auth_mode="premium",
+        room_admin_passphrase=None,
+        created_ms=None,
+        expires_at_ms=None,
+        creator_claim_token=None,
+    ):
+        self.app_id = str(app_id).strip() or "room"
+        self.room_id = self.app_id
         self.base_path = _normalize_base_path(base_path)
         self.runtime = runtime
+        self.host = host
+        self.room_kind = room_kind
+        self.join_limit = int(join_limit)
+        self.admin_auth_mode = admin_auth_mode
+        self.room_admin_passphrase = room_admin_passphrase
+        self.created_ms = created_ms if created_ms is not None else runtime.kernel.scheduler_now_ms()
+        self.expires_at_ms = expires_at_ms
+        self.creator_claim_token = creator_claim_token
         self.title = title or "Sprint Poker"
         self.label = label or ""
         self.page_title = self.title if not self.label else "{} · {}".format(self.title, self.label)
         self.storage_key_prefix = "smallos-scrum-poker-{}".format(self.app_id)
-        self.state = _new_state(runtime)
+        self.room_task = None
+        self.destroyed = False
+        self.state = _new_state(
+            runtime,
+            room_id=self.room_id,
+            room_kind=self.room_kind,
+            join_limit=self.join_limit,
+            admin_auth_mode=self.admin_auth_mode,
+            room_admin_passphrase=self.room_admin_passphrase,
+            created_ms=self.created_ms,
+            expires_at_ms=self.expires_at_ms,
+            label=self.label,
+            creator_claim_token=self.creator_claim_token,
+        )
+        self.state["session_open"] = self.room_kind == "ephemeral"
         self.index_paths = {self.base_path}
         if self.base_path != "/":
             self.index_paths.add(self.base_path + "/")
@@ -87,48 +131,54 @@ class ScrumPokerApp:
         }
 
     def to_task(self):
-        """Return the per-app SmallOS supervisor task."""
+        """Return the per-room SmallOS supervisor task."""
         return SmallTask(
             2,
             idle_watchdog_task,
             isWatcher=True,
-            name="{}_app".format(self.app_id),
+            name="{}_room".format(self.app_id),
             args=(self,),
         )
 
     def shutdown(self):
-        """Release all connections tracked by this app instance."""
+        """Release all connections tracked by this room instance."""
         _shutdown_state(self.runtime, self.state)
 
     def matches_path(self, path):
-        """Return whether the request path belongs to this mounted app."""
+        """Return whether the request path belongs to this mounted room."""
         return _path_matches_base(path, self.base_path)
 
     def route_list(self):
-        """Return the public routes served by this app."""
+        """Return the public routes served by this room."""
         routes = sorted(self.index_paths)
         routes.extend(sorted(self.static_routes))
         routes.extend([self.ws_path, self.state_path, self.healthz_path])
         return routes
 
     def shell_open_command(self):
-        """Return the namespaced shell command used to open this app's session."""
+        """Return the namespaced shell command used to open this room."""
         return "poker {} session open".format(self.app_id)
 
     def shell_close_command(self):
-        """Return the namespaced shell command used to close this app's session."""
+        """Return the namespaced shell command used to close this room."""
         return "poker {} session close".format(self.app_id)
 
     def _render_index_html(self):
-        """Render the HTML shell for one mounted app instance."""
+        """Render the HTML shell for one mounted room instance."""
         template = _read_static_asset("index.html").decode("utf-8")
         replacements = {
             "__APP_ID__": html.escape(self.app_id, quote=True),
             "__APP_LABEL__": html.escape(self.label, quote=True),
             "__BASE_PATH__": html.escape(self.base_path, quote=True),
+            "__CREATOR_CLAIM_STORAGE_KEY__": html.escape(
+                "smallos-scrum-poker-creator-claim-{}".format(self.room_id),
+                quote=True,
+            ),
             "__HEALTHZ_PATH__": html.escape(self.healthz_path, quote=True),
             "__INSTANCE_BADGE_HIDDEN__": "hidden" if not self.label else "",
             "__PAGE_TITLE__": html.escape(self.page_title, quote=True),
+            "__ROOM_ID__": html.escape(self.room_id, quote=True),
+            "__ROOM_KIND__": html.escape(self.room_kind, quote=True),
             "__SHELL_CLOSE_COMMAND__": html.escape(self.shell_close_command(), quote=True),
             "__SHELL_OPEN_COMMAND__": html.escape(self.shell_open_command(), quote=True),
             "__STATE_PATH__": html.escape(self.state_path, quote=True),
@@ -141,7 +191,7 @@ class ScrumPokerApp:
         return template
 
     def index_response(self):
-        """Build the dynamic HTML response for this app."""
+        """Build the dynamic HTML response for this room."""
         try:
             body = self._render_index_html()
         except OSError:
@@ -149,7 +199,7 @@ class ScrumPokerApp:
         return _http_response(200, body, "text/html; charset=utf-8")
 
     def static_asset_response(self, path):
-        """Build one static asset response for this mounted app."""
+        """Build one static asset response for this mounted room."""
         asset = self.static_routes.get(path)
         if asset is None:
             return None
@@ -161,8 +211,19 @@ class ScrumPokerApp:
             return _http_response(500, "static asset unavailable\n")
         return _http_response(200, body, content_type)
 
+    def unavailable_response(self):
+        """Build a room-unavailable response for an expired or destroyed room."""
+        try:
+            body = _read_static_asset("room_unavailable.html")
+        except OSError:
+            return _http_response(404, "room unavailable\n")
+        return _http_response(404, body, "text/html; charset=utf-8")
+
     def build_http_response(self, method, target, path):
-        """Build one HTTP response for this app and request path."""
+        """Build one HTTP response for this room and request path."""
+        if self.destroyed or self.state.get("destroyed") or _room_has_expired(self.state):
+            return self.unavailable_response()
+
         if method != "GET":
             return _http_response(405, "only GET is supported\n")
 
@@ -190,37 +251,13 @@ class ScrumPokerApp:
 
         return _http_response(404, "route not found\n")
 
-    def stats_snapshot(self):
-        """Return a lightweight operations snapshot for this mounted board."""
-        _expire_stale_connections(self.state)
-        connections = list(self.state.get("connections", {}).values())
-        joined_users = sum(1 for connection in connections if connection.get("name") and not connection.get("closed"))
-        connected_transports = sum(1 for connection in connections if connection.get("connected", True))
-        pending_state_messages = sum(
-            int(connection.get("pending_shared_state_text") is not None)
-            + int(connection.get("pending_viewer_state_text") is not None)
-            for connection in connections
-        )
-        pending_messages = sum(len(connection.get("pending_messages", ()) or ()) for connection in connections)
-        dropped_state_updates = sum(int(connection.get("dropped_state_updates", 0)) for connection in connections)
-        stats = self.state.get("stats", {})
-        return {
-            "app_id": self.app_id,
-            "base_path": self.base_path,
-            "connected_transports": connected_transports,
-            "dropped_state_updates": dropped_state_updates,
-            "joined_users": joined_users,
-            "last_activity_ms": self.state.get("last_activity_ms", 0),
-            "pending_messages": pending_messages,
-            "pending_state_messages": pending_state_messages,
-            "queue_disconnects": int(stats.get("queue_disconnects", 0)),
-            "shared_state_rebuilds": int(stats.get("shared_state_rebuilds", 0)),
-            "state_version": int(self.state.get("state_version", 0)),
-        }
-
     async def websocket_session(self, task, sock, client_addr, headers):
         """Upgrade one HTTP client into a live websocket scrum poker session."""
         state = self.state
+        if self.destroyed or state.get("destroyed") or _room_has_expired(state):
+            await _send_all(task, sock, _http_response(404, "room unavailable\n"))
+            return
+
         allowed_origins_env = os.environ.get("ALLOWED_ORIGINS", "").strip()
         if allowed_origins_env:
             allowed_origins = {origin.strip().rstrip("/") for origin in allowed_origins_env.split(",") if origin.strip()}
@@ -229,7 +266,14 @@ class ScrumPokerApp:
                 await _send_all(task, sock, _http_response(403, "origin not allowed\n"))
                 return
 
-        if _connected_count(state) >= MAX_CONNECTIONS or _connections_over_hard_cap(state):
+        connected_limit = _get_max_connections()
+        total_connections = _connected_count(state)
+        total_records = len(state.get("connections", {}))
+        if self.host is not None:
+            total_connections = self.host.total_connected_count()
+            total_records = self.host.total_connection_records()
+
+        if total_connections >= connected_limit or total_records >= connected_limit * 2 or _connections_over_hard_cap(state):
             await _send_all(task, sock, _http_response(503, "too many connections\n"))
             return
 
@@ -271,6 +315,9 @@ class ScrumPokerApp:
         skip_async_cleanup = False
         try:
             while True:
+                if self.destroyed or state.get("destroyed") or _room_has_expired(state):
+                    return
+
                 event = await websocket.receive()
                 event_type = event["type"]
 
@@ -335,7 +382,6 @@ class ScrumPokerApp:
                 connection["socket"] = None
                 connection["session_task"] = None
                 connection["websocket"] = None
-                _mark_state_dirty(state)
                 if writer_task is not None:
                     writer_task.acceptSignal(OUTBOX_SIGNAL)
 
@@ -359,11 +405,13 @@ class ScrumPokerApp:
                     "[scrum-poker:{}] websocket client {} disconnected\n".format(self.app_id, connection["client_id"])
                 )
                 _expire_stale_connections(state)
-                self.broadcast_state()
+                if not self.destroyed and not state.get("destroyed"):
+                    self.broadcast_state()
 
     def broadcast_state(self):
-        """Queue a fresh state snapshot for every websocket client in this app."""
-        _broadcast_state(self.state)
+        """Queue a fresh state snapshot for every websocket client in this room."""
+        if not self.destroyed and not self.state.get("destroyed"):
+            _broadcast_state(self.state)
 
 
-__all__ = ["ScrumPokerApp", "idle_watchdog_task"]
+__all__ = ["ScrumPokerApp", "idle_watchdog_task", "EPHEMERAL_ROOM_TTL_SECONDS"]
