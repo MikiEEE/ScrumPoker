@@ -54,6 +54,24 @@ class ScrumPokerHost:
             routes.extend(app.route_list())
         return " ".join(routes)
 
+    def stats_snapshot(self):
+        """Return aggregated stats for all mounted scrum poker apps."""
+        app_stats = [app.stats_snapshot() for app in self.apps]
+        totals = {
+            "joined_users": sum(item.get("joined_users", 0) for item in app_stats),
+            "connected_transports": sum(item.get("connected_transports", 0) for item in app_stats),
+            "pending_state_messages": sum(item.get("pending_state_messages", 0) for item in app_stats),
+            "pending_messages": sum(item.get("pending_messages", 0) for item in app_stats),
+            "dropped_state_updates": sum(item.get("dropped_state_updates", 0) for item in app_stats),
+            "queue_disconnects": sum(item.get("queue_disconnects", 0) for item in app_stats),
+        }
+        return {
+            "apps": app_stats,
+            "host": self.host,
+            "port": self.port,
+            "totals": totals,
+        }
+
     async def web_client_handler(self, task, client_sock, client_addr):
         """Handle one inbound HTTP/WebSocket client using mounted app routing."""
         kernel = task.OS.kernel
@@ -119,7 +137,7 @@ class ScrumPokerHost:
 
         task.OS.print("smallOS scrum poker running on http://{}:{}/\n".format(self.host, self.port))
         task.OS.print("routes: {}\n".format(self.route_summary()))
-        task.OS.print("Open the shell and use: poker apps | poker root session open | poker legalease session open\n")
+        task.OS.print("Open the shell and use: poker apps | poker stats | poker root session open | poker legalease session open\n")
 
         try:
             while True:

@@ -1,5 +1,6 @@
 """Shared helpers and state utilities for the SmallOS scrum poker app."""
 
+from collections import deque
 import hmac
 import json
 import os
@@ -26,6 +27,7 @@ MAX_CONNECTIONS = 200  # total concurrent WebSocket transports (joined + anonymo
 MAX_ADMIN_FAILURES = 5  # per-connection lockout after this many wrong passphrase guesses
 MESSAGE_RATE_LIMIT_MS = 50  # minimum ms between processed messages per connection (~20/sec)
 MESSAGE_RATE_BURST = 100  # disconnect after this many back-to-back throttled messages
+MAX_PENDING_AUX_MESSAGES = 8  # non-state messages queued for one connection before it is disconnected
 ALLOWED_VOTES = (
     "0",
     "0.5",
@@ -68,6 +70,7 @@ def _http_reason(status_code):
         413: "Payload Too Large",
         426: "Upgrade Required",
         500: "Internal Server Error",
+        503: "Service Unavailable",
     }
     return reasons.get(status_code, "OK")
 
@@ -230,6 +233,17 @@ def _new_state(runtime):
         "next_connection_id": 1,
         "connections": {},
         "connections_by_token": {},
+        "state_version": 0,
+        "shared_state_cache_version": None,
+        "shared_state_cache": None,
+        "shared_state_message_cache_version": None,
+        "shared_state_message_cache": None,
+        "stats": {
+            "broadcasts": 0,
+            "shared_state_rebuilds": 0,
+            "dropped_state_updates": 0,
+            "queue_disconnects": 0,
+        },
     }
 
 
@@ -289,9 +303,13 @@ def _shutdown_state(runtime, state):
     state["listener"] = None
 
     for connection in list(state.get("connections", {}).values()):
+        _ensure_connection_queue_fields(connection)
         connection["connected"] = False
         connection["shutdown_after_drain"] = True
         connection["websocket"] = None
+        connection["pending_shared_state_text"] = None
+        connection["pending_viewer_state_text"] = None
+        connection["pending_messages"].clear()
         _close_socket_quietly(kernel, connection.get("socket"))
         connection["socket"] = None
 
@@ -366,6 +384,48 @@ def _touch_activity(state):
     state["last_activity_ms"] = _now_ms(state)
 
 
+def _mark_state_dirty(state):
+    """Invalidate cached shared state after one meaningful board change."""
+    state["state_version"] = int(state.get("state_version", 0)) + 1
+    state["shared_state_cache_version"] = None
+    state["shared_state_cache"] = None
+    state["shared_state_message_cache_version"] = None
+    state["shared_state_message_cache"] = None
+    return state["state_version"]
+
+
+def _mark_connection_viewer_dirty(connection):
+    """Mark a connection's viewer-specific state as needing a refresh."""
+    connection["viewer_state_dirty"] = True
+
+
+def _ensure_connection_queue_fields(connection):
+    """Backfill queue-related connection fields for newer bounded queues."""
+    if connection is None:
+        return
+
+    if "pending_messages" not in connection or connection["pending_messages"] is None:
+        legacy_messages = connection.get("outbox", [])
+        connection["pending_messages"] = deque(legacy_messages)
+    elif not isinstance(connection["pending_messages"], deque):
+        connection["pending_messages"] = deque(connection["pending_messages"])
+
+    if "pending_shared_state_text" not in connection:
+        connection["pending_shared_state_text"] = None
+    if "pending_viewer_state_text" not in connection:
+        connection["pending_viewer_state_text"] = None
+    if "dropped_state_updates" not in connection:
+        connection["dropped_state_updates"] = 0
+    if "disconnect_reason" not in connection:
+        connection["disconnect_reason"] = None
+    if "viewer_state_dirty" not in connection:
+        connection["viewer_state_dirty"] = True
+    if "last_msg_ms" not in connection:
+        connection["last_msg_ms"] = 0
+    if "rate_burst" not in connection:
+        connection["rate_burst"] = 0
+
+
 def _connected_count(state):
     """Return the number of live websocket transports."""
     return sum(1 for connection in state.get("connections", {}).values() if connection.get("connected", True))
@@ -398,15 +458,23 @@ def _remove_connection_record(state, connection):
 def _expire_stale_connections(state):
     """Drop disconnected participant records once their resume window expires."""
     now_ms = _now_ms(state)
+    removed_any = False
+
     for connection in list(state.get("connections", {}).values()):
         if connection.get("closed"):
             _remove_connection_record(state, connection)
+            removed_any = True
             continue
+
         deadline = connection.get("resume_deadline_ms")
         if connection.get("connected", True) or deadline is None:
             continue
         if now_ms >= deadline:
             _remove_connection_record(state, connection)
+            removed_any = True
+
+    if removed_any:
+        _mark_state_dirty(state)
 
 
 def _connections_over_hard_cap(state):
@@ -425,16 +493,24 @@ def _make_connection_record(state, client_addr, session_token=None, tab_id=None)
         "client_id": client_id,
         "closed": False,
         "connected": False,
+        "disconnect_reason": None,
+        "dropped_state_updates": 0,
         "is_admin": False,
+        "last_msg_ms": 0,
         "name": None,
-        "outbox": [],
+        "pending_messages": deque(),
+        "pending_shared_state_text": None,
+        "pending_viewer_state_text": None,
+        "rate_burst": 0,
         "resume_deadline_ms": None,
+        "session_task": None,
         "session_token": session_token or _new_session_token(),
         "shutdown_after_drain": False,
         "socket": None,
-        "session_task": None,
+        "state": state,
         "tab_id": tab_id,
         "transport_id": 0,
+        "viewer_state_dirty": True,
         "vote": None,
         "websocket": None,
         "writer_task": None,
@@ -446,6 +522,7 @@ def _make_connection_record(state, client_addr, session_token=None, tab_id=None)
 
 def _attach_connection_transport(task, state, connection, sock, client_addr):
     """Attach the current websocket transport to one participant record."""
+    _ensure_connection_queue_fields(connection)
     os_ref = state.get("os")
     old_session = connection.get("session_task")
     if old_session is not None and old_session is not task and not old_session.done:
@@ -473,13 +550,20 @@ def _attach_connection_transport(task, state, connection, sock, client_addr):
     connection["addr"] = str(client_addr)
     connection["closed"] = False
     connection["connected"] = True
-    connection["outbox"] = []
+    connection["disconnect_reason"] = None
+    connection["pending_messages"].clear()
+    connection["pending_shared_state_text"] = None
+    connection["pending_viewer_state_text"] = None
+    connection["rate_burst"] = 0
     connection["resume_deadline_ms"] = None
     connection["session_task"] = task
     connection["shutdown_after_drain"] = False
     connection["socket"] = sock
+    connection["state"] = state
     connection["transport_id"] = int(connection.get("transport_id", 0)) + 1
     connection["websocket"] = None
+    _mark_connection_viewer_dirty(connection)
+    _mark_state_dirty(state)
 
     writer_task = task.spawn(
         websocket_writer_task,
@@ -528,55 +612,89 @@ def _iter_participants(state):
     return joined
 
 
-def _build_public_state(state, viewer_id=None):
-    """Build the browser-visible session snapshot for one connection."""
+def _build_viewer_state(state, viewer_id=None):
+    """Build the viewer-specific payload for one connection."""
+    viewer = state.get("connections", {}).get(viewer_id)
+    if viewer is None or viewer.get("closed"):
+        return None
+    return {
+        "client_id": viewer["client_id"],
+        "is_admin": bool(viewer.get("is_admin")),
+        "name": viewer.get("name"),
+        "session_token": viewer.get("session_token"),
+        "vote": viewer.get("vote"),
+    }
+
+
+def _build_shared_state(state):
+    """Build or reuse the cached room-wide state snapshot."""
     _expire_stale_connections(state)
+    version = state.get("state_version", 0)
+    if state.get("shared_state_cache_version") == version and state.get("shared_state_cache") is not None:
+        return state["shared_state_cache"]
+
     participants = []
-    viewer = state["connections"].get(viewer_id)
+    votes_visible = bool(state["votes_visible"])
 
     for connection in _iter_participants(state):
-        is_self = connection["client_id"] == viewer_id
-        vote_value = connection.get("vote")
-        if not state["votes_visible"] and not is_self:
-            vote_value = None
-
+        vote_value = connection.get("vote") if votes_visible else None
         participants.append(
             {
                 "client_id": connection["client_id"],
                 "has_voted": connection.get("vote") is not None,
                 "is_admin": bool(connection.get("is_admin")),
                 "is_connected": bool(connection.get("connected", True)),
-                "is_self": is_self,
                 "name": connection["name"],
                 "vote": vote_value,
             }
         )
 
-    return {
+    shared_state = {
         "admin_auth_enabled": _admin_auth_enabled(),
         "connected_count": _connected_count(state),
-        "me": (
-            {
-                "client_id": viewer["client_id"],
-                "is_admin": bool(viewer.get("is_admin")),
-                "name": viewer.get("name"),
-                "session_token": viewer.get("session_token"),
-                "vote": viewer.get("vote"),
-            }
-            if viewer is not None
-            else None
-        ),
         "participant_count": len(participants),
         "participants": participants,
         "server_time": datetime.now(timezone.utc).strftime("%H:%M:%SZ"),
         "session_open": bool(state["session_open"]),
+        "state_version": version,
         "vote_options": list(ALLOWED_VOTES),
-        "votes_visible": bool(state["votes_visible"]),
+        "votes_visible": votes_visible,
     }
+    state["shared_state_cache_version"] = version
+    state["shared_state_cache"] = shared_state
+    state["stats"]["shared_state_rebuilds"] += 1
+    return shared_state
+
+
+def _build_public_state(state, viewer_id=None):
+    """Build the browser-visible session snapshot for one connection."""
+    shared_state = dict(_build_shared_state(state))
+    shared_state["me"] = _build_viewer_state(state, viewer_id)
+    return shared_state
+
+
+def _build_shared_state_message(state):
+    """Encode the room-wide websocket payload once per state version."""
+    shared_state = _build_shared_state(state)
+    version = shared_state["state_version"]
+    if state.get("shared_state_message_cache_version") == version and state.get("shared_state_message_cache") is not None:
+        return state["shared_state_message_cache"]
+
+    message = _json_text({"clear_error": True, "state": shared_state, "type": "state"})
+    state["shared_state_message_cache_version"] = version
+    state["shared_state_message_cache"] = message
+    return message
+
+
+def _build_viewer_state_message(connection):
+    """Encode one viewer-specific websocket payload."""
+    state = connection.get("state")
+    viewer_state = _build_viewer_state(state, connection.get("client_id")) if state is not None else None
+    return _json_text({"me": viewer_state, "type": "viewer_state"})
 
 
 def _build_state_message(state, viewer_id=None):
-    """Encode one personalized websocket state payload."""
+    """Encode one compatibility websocket payload with combined state."""
     return _json_text(
         {
             "clear_error": True,
@@ -586,21 +704,71 @@ def _build_state_message(state, viewer_id=None):
     )
 
 
-def _queue_connection_text(connection, text):
-    """Append one text message to a connection outbox and wake its writer."""
-    if connection.get("closed") or not connection.get("connected", True):
-        return
-    connection["outbox"].append(text)
+def _signal_writer(connection):
+    """Wake a connection writer task when queued work is available."""
     writer_task = connection.get("writer_task")
     if writer_task is not None and not writer_task.done:
         writer_task.acceptSignal(OUTBOX_SIGNAL)
 
 
+def _request_backpressure_disconnect(state, connection, reason="client fell behind"):
+    """Disconnect one slow client after exhausting state coalescing."""
+    if state is not None:
+        state["stats"]["queue_disconnects"] += 1
+    connection["disconnect_reason"] = reason
+    _kick_connection(state, connection)
+
+
+def _queue_state_update(connection, shared_state_text, viewer_state_text=None):
+    """Coalesce the latest state payload for one connection."""
+    _ensure_connection_queue_fields(connection)
+    if connection.get("closed") or not connection.get("connected", True):
+        return
+
+    state = connection.get("state")
+    if connection.get("pending_shared_state_text") is not None or (
+        viewer_state_text is not None and connection.get("pending_viewer_state_text") is not None
+    ):
+        connection["dropped_state_updates"] = int(connection.get("dropped_state_updates", 0)) + 1
+        if state is not None:
+            state["stats"]["dropped_state_updates"] += 1
+
+    connection["pending_shared_state_text"] = shared_state_text
+    if viewer_state_text is not None:
+        connection["pending_viewer_state_text"] = viewer_state_text
+    _signal_writer(connection)
+
+
+def _queue_connection_text(connection, text):
+    """Append one non-state message to a bounded queue and wake its writer."""
+    _ensure_connection_queue_fields(connection)
+    if connection.get("closed") or not connection.get("connected", True):
+        return
+
+    state = connection.get("state")
+    pending_messages = connection["pending_messages"]
+    if len(pending_messages) >= MAX_PENDING_AUX_MESSAGES:
+        _request_backpressure_disconnect(state, connection)
+        return
+
+    pending_messages.append(text)
+    _signal_writer(connection)
+
+
 def _broadcast_state(state):
-    """Queue a fresh state snapshot for every connected websocket client."""
+    """Queue the latest shared state, plus dirty viewer state, for every live client."""
     _expire_stale_connections(state)
+    state["stats"]["broadcasts"] += 1
+    shared_state_text = _build_shared_state_message(state)
+
     for connection in list(state["connections"].values()):
-        _queue_connection_text(connection, _build_state_message(state, connection["client_id"]))
+        if connection.get("closed") or not connection.get("connected", True):
+            continue
+        viewer_state_text = None
+        if connection.get("viewer_state_dirty"):
+            viewer_state_text = _build_viewer_state_message(connection)
+            connection["viewer_state_dirty"] = False
+        _queue_state_update(connection, shared_state_text, viewer_state_text=viewer_state_text)
 
 
 def _queue_error(connection, message):
@@ -618,14 +786,26 @@ def _queue_notice(connection, message, kind="info"):
 
 def _clear_votes(state):
     """Discard all active votes and collapse the board back to hidden mode."""
+    changed = bool(state.get("votes_visible"))
     for connection in state["connections"].values():
-        connection["vote"] = None
+        if connection.get("vote") is not None:
+            changed = True
+            connection["vote"] = None
+            _mark_connection_viewer_dirty(connection)
     state["votes_visible"] = False
+    if changed:
+        _mark_state_dirty(state)
+    return changed
 
 
 def _set_session_open(state, is_open):
     """Update whether new participants may join the session."""
-    state["session_open"] = bool(is_open)
+    desired_state = bool(is_open)
+    if state.get("session_open") == desired_state:
+        return False
+    state["session_open"] = desired_state
+    _mark_state_dirty(state)
+    return True
 
 
 def _parse_client_id(value):
@@ -636,12 +816,13 @@ def _parse_client_id(value):
         return None
 
 
-def _kick_connection(state, target_connection):
+def _kick_connection(state, target_connection, mark_dirty=True):
     """Disconnect one websocket client and remove it from the shared state."""
     if target_connection is None:
         return
 
-    os_ref = state.get("os")
+    _ensure_connection_queue_fields(target_connection)
+    os_ref = state.get("os") if state is not None else None
     session_task = target_connection.get("session_task")
     if session_task is not None and not session_task.done and os_ref is not None:
         try:
@@ -652,10 +833,13 @@ def _kick_connection(state, target_connection):
     target_connection["connected"] = False
     target_connection["closed"] = True
     target_connection["shutdown_after_drain"] = True
-    target_connection["outbox"] = []
+    target_connection["pending_shared_state_text"] = None
+    target_connection["pending_viewer_state_text"] = None
+    target_connection["pending_messages"].clear()
     target_connection["websocket"] = None
     target_connection["session_task"] = None
-    _remove_connection_record(state, target_connection)
+    if state is not None:
+        _remove_connection_record(state, target_connection)
 
     writer_task = target_connection.get("writer_task")
     if writer_task is not None and not writer_task.done:
@@ -663,32 +847,37 @@ def _kick_connection(state, target_connection):
             try:
                 os_ref.cancel_task(writer_task)
             except Exception:
-                writer_task.acceptSignal(OUTBOX_SIGNAL)
+                _signal_writer(target_connection)
         else:
-            writer_task.acceptSignal(OUTBOX_SIGNAL)
+            _signal_writer(target_connection)
 
     socket_obj = target_connection.get("socket")
-    kernel = state.get("kernel")
-    if socket_obj is None:
-        return
+    kernel = state.get("kernel") if state is not None else None
+    target_connection["socket"] = None
+    if socket_obj is not None:
+        try:
+            if kernel is not None:
+                kernel.socket_close(socket_obj)
+            else:
+                socket_obj.close()
+        except Exception:
+            pass
 
-    try:
-        if kernel is not None:
-            kernel.socket_close(socket_obj)
-        else:
-            socket_obj.close()
-    except Exception:
-        pass
+    if state is not None and mark_dirty:
+        _mark_state_dirty(state)
 
 
 def _clear_everyone(state):
     """Kick every participant off the board and close the session."""
     participants = list(state.get("connections", {}).values())
+    had_state = bool(participants) or bool(state.get("session_open")) or bool(state.get("votes_visible"))
     for connection in participants:
-        _kick_connection(state, connection)
+        _kick_connection(state, connection, mark_dirty=False)
     state["session_open"] = False
     state["votes_visible"] = False
     _touch_activity(state)
+    if had_state:
+        _mark_state_dirty(state)
     return len(participants)
 
 
@@ -708,6 +897,8 @@ def _apply_client_message(state, connection, payload):
         if not connection.get("name") and not connection.get("is_admin") and _joined_count(state) >= MAX_PARTICIPANTS:
             return "this session is full (max {} participants)".format(MAX_PARTICIPANTS)
         connection["name"] = name
+        _mark_connection_viewer_dirty(connection)
+        _mark_state_dirty(state)
         _touch_activity(state)
         return None
 
@@ -724,6 +915,8 @@ def _apply_client_message(state, connection, payload):
             return "incorrect admin passphrase"
         connection["admin_failures"] = 0
         connection["is_admin"] = True
+        _mark_connection_viewer_dirty(connection)
+        _mark_state_dirty(state)
         _queue_notice(connection, "Admin access granted.", kind="success")
         return None
 
@@ -734,6 +927,8 @@ def _apply_client_message(state, connection, payload):
         if vote is None:
             return "unsupported vote value"
         connection["vote"] = vote
+        _mark_connection_viewer_dirty(connection)
+        _mark_state_dirty(state)
         _touch_activity(state)
         return None
 
@@ -741,20 +936,25 @@ def _apply_client_message(state, connection, payload):
         if not connection.get("name") and not connection.get("is_admin"):
             return "join the session before revealing votes"
         state["votes_visible"] = not state["votes_visible"]
+        _mark_state_dirty(state)
         _touch_activity(state)
         return None
 
     if message_type == "show_votes":
         if not connection.get("name") and not connection.get("is_admin"):
             return "join the session before revealing votes"
-        state["votes_visible"] = True
+        if not state.get("votes_visible"):
+            state["votes_visible"] = True
+            _mark_state_dirty(state)
         _touch_activity(state)
         return None
 
     if message_type == "hide_votes":
         if not connection.get("name") and not connection.get("is_admin"):
             return "join the session before hiding votes"
-        state["votes_visible"] = False
+        if state.get("votes_visible"):
+            state["votes_visible"] = False
+            _mark_state_dirty(state)
         _touch_activity(state)
         return None
 
@@ -913,16 +1113,33 @@ def _parse_request_target(target):
 
 
 async def websocket_writer_task(task, connection):
-    """Serialize all writes for one websocket client connection."""
+    """Serialize writes for one websocket client connection with bounded queues."""
     websocket = connection["websocket"]
+    _ensure_connection_queue_fields(connection)
 
     try:
         while True:
-            while connection["outbox"]:
-                message = connection["outbox"].pop(0)
+            while connection.get("pending_shared_state_text") is not None:
+                message = connection["pending_shared_state_text"]
+                connection["pending_shared_state_text"] = None
+                await websocket.send_text(message)
+
+            while connection.get("pending_viewer_state_text") is not None:
+                message = connection["pending_viewer_state_text"]
+                connection["pending_viewer_state_text"] = None
+                await websocket.send_text(message)
+
+            while connection["pending_messages"]:
+                message = connection["pending_messages"].popleft()
                 await websocket.send_text(message)
 
             if connection.get("shutdown_after_drain"):
+                reason = connection.get("disconnect_reason") or ""
+                if getattr(websocket, "connected", False):
+                    try:
+                        await websocket.send_close(code=1001, reason=reason[:120])
+                    except Exception:
+                        pass
                 return "writer stopped"
 
             await task.wait_signal(OUTBOX_SIGNAL)
@@ -946,6 +1163,7 @@ __all__ = [
     "MAX_FRAME_SIZE",
     "MAX_MESSAGE_SIZE",
     "MAX_PARTICIPANTS",
+    "MAX_PENDING_AUX_MESSAGES",
     "MESSAGE_RATE_BURST",
     "MESSAGE_RATE_LIMIT_MS",
     "OUTBOX_SIGNAL",
@@ -962,12 +1180,17 @@ __all__ = [
     "_build_public_state",
     "_build_route",
     "_build_runtime",
+    "_build_shared_state",
+    "_build_shared_state_message",
     "_build_state_message",
+    "_build_viewer_state",
+    "_build_viewer_state_message",
     "_clear_everyone",
     "_clear_votes",
     "_close_socket_quietly",
     "_connected_count",
     "_connections_over_hard_cap",
+    "_ensure_connection_queue_fields",
     "_expire_stale_connections",
     "_get_admin_passphrase",
     "_get_host",
@@ -981,6 +1204,8 @@ __all__ = [
     "_kick_connection",
     "_load_dotenv_file",
     "_make_connection_record",
+    "_mark_connection_viewer_dirty",
+    "_mark_state_dirty",
     "_new_session_token",
     "_new_state",
     "_normalize_base_path",
@@ -997,15 +1222,18 @@ __all__ = [
     "_queue_connection_text",
     "_queue_error",
     "_queue_notice",
+    "_queue_state_update",
     "_read_exact",
     "_read_request_head",
     "_read_static_asset",
     "_remove_connection_record",
+    "_request_backpressure_disconnect",
     "_resolve_connection_for_socket",
     "_send_all",
     "_set_session_open",
     "_shutdown_runtime",
     "_shutdown_state",
+    "_signal_writer",
     "_static_asset_response",
     "_strip_dotenv_comment",
     "_touch_activity",

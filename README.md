@@ -36,7 +36,7 @@ From the project root:
 cp .env.example .env
 # edit .env and set ADMIN_PASSPHRASE
 # optionally change HOST / PORT
-python3 scrum_poker_app.py
+python3 app.py
 ```
 
 Then open:
@@ -55,6 +55,7 @@ When the app starts, it also opens a SmallOS shell in the terminal.
 Useful commands:
 
 - `poker apps`: list mounted scrum poker boards
+- `poker stats`: show per-board joined users, connected transports, queue pressure, and dropped-state counters
 - `poker root session open`: allow new users to join the root board
 - `poker root session close`: prevent new users from joining the root board
 - `poker legalease session open`: allow new users to join the `/legalease` board
@@ -114,6 +115,12 @@ Focused scrum poker tests:
 python3 -m unittest tests.test_scrum_poker_app tests.test_smallos_websocket_server -v
 ```
 
+Quick local benchmark for the supported room shapes:
+
+```bash
+python3 benchmark_scrum_poker.py
+```
+
 Full SmallOS test suite:
 
 ```bash
@@ -123,11 +130,12 @@ python3 -m unittest discover -s tests -v
 
 ## Project Structure
 
-- [`scrum_poker_app.py`](./scrum_poker_app.py): app entrypoint and compatibility import surface
+- [`app.py`](./app.py): executable SmallOS entrypoint and board composition
+- [`scrum_poker_app.py`](./scrum_poker_app.py): mounted scrum poker board class and idle watchdog
 - [`scrum_poker_core.py`](./scrum_poker_core.py): shared poker state helpers, HTTP helpers, dotenv loading, and runtime wiring utilities
-- [`scrum_poker_board.py`](./scrum_poker_board.py): mounted scrum poker board class and idle watchdog
 - [`scrum_poker_host.py`](./scrum_poker_host.py): shared host/router class for mounted boards
 - [`scrum_poker_shell.py`](./scrum_poker_shell.py): multi-board SmallOS shell commands
+- [`benchmark_scrum_poker.py`](./benchmark_scrum_poker.py): lightweight benchmark for many-small-room broadcast behavior
 - [`smallos_websocket_server.py`](./smallos_websocket_server.py): local SmallOS-friendly websocket server helper used by the app
 - [`.env.example`](./.env.example): sample environment file for `ADMIN_PASSPHRASE` and optional origin restrictions
 - [`static/index.html`](./static/index.html): main browser markup
