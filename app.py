@@ -9,22 +9,35 @@ from scrum_poker_host import ScrumPokerHost
 from scrum_poker_shell import ScrumPokerShell
 
 
-__all__ = list(_core_exports) + ["ScrumPokerApp", "ScrumPokerHost", "ScrumPokerShell", "main"]
+__all__ = list(_core_exports) + ["ScrumPokerApp", "ScrumPokerHost", "ScrumPokerShell", "build_premium_room", "main"]
+
+
+def build_premium_room(runtime):
+    """Create the permanent premium Legalease room."""
+    return ScrumPokerApp(
+        "legalease",
+        "/legalease",
+        runtime,
+        title="Sprint Poker",
+        label="Legalease",
+        room_kind="premium",
+        join_limit=PREMIUM_JOIN_LIMIT,
+        admin_auth_mode="premium",
+    )
 
 
 def main():
-    """Start the multi-instance SmallOS scrum poker runtime."""
+    """Start the premium + ephemeral SmallOS scrum poker runtime."""
     runtime = _build_runtime()
-    root_app = ScrumPokerApp("root", "/", runtime, title="Sprint Poker")
-    legalease_app = ScrumPokerApp("legalease", "/legalease", runtime, title="Sprint Poker", label="Legalease")
-    apps = [root_app, legalease_app]
-    host = ScrumPokerHost(apps, host=_get_host(), port=_get_port())
+    legalease_room = build_premium_room(runtime)
+    host = ScrumPokerHost([legalease_room], host=_get_host(), port=_get_port())
+    legalease_room.host = host
 
-    shell = ScrumPokerShell(apps, prompt="poker> ", allow_python=False)
+    shell = ScrumPokerShell(host, prompt="poker> ", allow_python=False)
     runtime.shells.append(shell.setOS(runtime))
 
     host_task = host.to_task()
-    app_tasks = [app.to_task() for app in apps]
+    room_tasks = [legalease_room.to_task()]
     shell_stdin = shell.make_task(
         priority=1,
         name="shell_stdin",
@@ -32,12 +45,12 @@ def main():
         poll_interval=0.1,
         banner_text=(
             "\nInteractive scrum poker shell enabled.\n"
-            "Commands: poker apps, poker root session open, poker legalease session open, ps, stat <pid>, toggle, help\n"
+            "Commands: poker rooms, poker legalease session open, poker <guid> session open, ps, stat <pid>, toggle, help\n"
         ),
         force_output=True,
     )
 
-    runtime.fork([host_task, *app_tasks, shell_stdin])
+    runtime.fork([host_task, *room_tasks, shell_stdin])
 
     try:
         runtime.startOS()
@@ -45,14 +58,14 @@ def main():
         if host_task.exception is not None and not isinstance(host_task.exception, TaskCancelledError):
             raise host_task.exception
 
-        for app_task in app_tasks:
-            if app_task.exception is not None and not isinstance(app_task.exception, TaskCancelledError):
-                raise app_task.exception
+        for room_task in room_tasks:
+            if room_task.exception is not None and not isinstance(room_task.exception, TaskCancelledError):
+                raise room_task.exception
 
         if shell_stdin.exception is not None and not isinstance(shell_stdin.exception, TaskCancelledError):
             raise shell_stdin.exception
     finally:
-        _shutdown_runtime(runtime, host, apps)
+        _shutdown_runtime(runtime, host, [legalease_room])
 
 
 if __name__ == "__main__":

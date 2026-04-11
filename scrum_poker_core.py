@@ -21,8 +21,12 @@ HEADER_READ_TIMEOUT_SECONDS = 10  # close slow-loris connections after this many
 MAX_FRAME_SIZE = 64 * 1024
 MAX_MESSAGE_SIZE = 256 * 1024
 OUTBOX_SIGNAL = 9
-MAX_PARTICIPANTS = 50
-MAX_CONNECTIONS = 200  # total concurrent WebSocket transports (joined + anonymous)
+PREMIUM_JOIN_LIMIT = 20
+EPHEMERAL_JOIN_LIMIT = 8
+EPHEMERAL_ROOM_LIMIT = 19
+EPHEMERAL_ROOM_TTL_SECONDS = 2 * 60 * 60
+MAX_PARTICIPANTS = PREMIUM_JOIN_LIMIT  # legacy default kept for callers that do not pass a room limit
+MAX_CONNECTIONS = 320  # default global transport cap across every active room
 MAX_ADMIN_FAILURES = 5  # per-connection lockout after this many wrong passphrase guesses
 MESSAGE_RATE_LIMIT_MS = 50  # minimum ms between processed messages per connection (~20/sec)
 MESSAGE_RATE_BURST = 100  # disconnect after this many back-to-back throttled messages
@@ -48,12 +52,7 @@ CONFIG_PATH = os.path.join(SMALLOS_ROOT, "smallos.config.json")
 DOTENV_PATH = os.path.join(PROJECT_ROOT, ".env")
 STATIC_DIR = os.path.join(PROJECT_ROOT, "static")
 SESSION_RESUME_GRACE_SECONDS = 45  # how long a disconnected participant's slot is held before they're removed from the board
-IDLE_TIMEOUT_SECONDS = 3600  # 1 hour of no activity kicks and closes the session
-STATIC_ASSETS = {
-    "/": ("index.html", "text/html; charset=utf-8"),
-    "/static/app.css": ("app.css", "text/css; charset=utf-8"),
-    "/static/app.js": ("app.js", "application/javascript; charset=utf-8"),
-}
+IDLE_TIMEOUT_SECONDS = 3600  # 1 hour of no activity clears the premium room and destroys ephemeral rooms
 
 
 def _http_reason(status_code):
@@ -61,6 +60,7 @@ def _http_reason(status_code):
     reasons = {
         101: "Switching Protocols",
         200: "OK",
+        201: "Created",
         400: "Bad Request",
         403: "Forbidden",
         404: "Not Found",
@@ -68,6 +68,7 @@ def _http_reason(status_code):
         413: "Payload Too Large",
         426: "Upgrade Required",
         500: "Internal Server Error",
+        503: "Service Unavailable",
     }
     return reasons.get(status_code, "OK")
 
@@ -169,8 +170,18 @@ _load_dotenv_file()
 
 
 def _get_admin_passphrase():
-    """Return the currently configured admin passphrase."""
+    """Return the legacy global admin passphrase."""
     return os.environ.get("ADMIN_PASSPHRASE", "").strip()
+
+
+def _get_legalease_admin_passphrase():
+    """Return the premium Legalease admin passphrase."""
+    return os.environ.get("LEGALEASE_ADMIN_PASSPHRASE", "").strip() or _get_admin_passphrase()
+
+
+def _get_super_user_passphrase():
+    """Return the super-user passphrase valid in every room."""
+    return os.environ.get("SUPER_USER_PASSPHRASE", "").strip()
 
 
 def _get_host():
@@ -190,9 +201,14 @@ def _get_port():
     return port
 
 
-def _admin_auth_enabled():
-    """Report whether browser-side admin elevation is configured."""
-    return bool(_get_admin_passphrase())
+def _get_max_connections():
+    """Return the configured global WebSocket transport cap."""
+    raw_value = str(os.environ.get("MAX_CONNECTIONS", MAX_CONNECTIONS)).strip()
+    try:
+        limit = int(raw_value)
+    except (TypeError, ValueError):
+        return MAX_CONNECTIONS
+    return max(1, limit)
 
 
 def _read_static_asset(filename):
@@ -202,34 +218,44 @@ def _read_static_asset(filename):
         return asset_file.read()
 
 
-def _static_asset_response(path):
-    """Build an HTTP response for one known static asset path."""
-    asset = STATIC_ASSETS.get(path)
-    if asset is None:
-        return None
-
-    filename, content_type = asset
-    try:
-        body = _read_static_asset(filename)
-    except OSError:
-        return _http_response(500, "static asset unavailable\n")
-    return _http_response(200, body, content_type)
-
-
-def _new_state(runtime):
-    """Return the shared in-memory scrum poker session state."""
+def _new_state(
+    runtime,
+    room_id="room",
+    room_kind="premium",
+    join_limit=MAX_PARTICIPANTS,
+    admin_auth_mode="premium",
+    room_admin_passphrase=None,
+    created_ms=None,
+    expires_at_ms=None,
+    label="",
+    creator_claim_token=None,
+):
+    """Return the shared in-memory scrum poker session state for one room."""
     now = runtime.kernel.scheduler_now_ms()
+    created_at = now if created_ms is None else created_ms
     return {
-        "kernel": runtime.kernel,
-        "listener": None,
-        "os": runtime,
-        "started_ms": now,
-        "last_activity_ms": now,
-        "session_open": False,
-        "votes_visible": False,
-        "next_connection_id": 1,
+        "admin_auth_mode": admin_auth_mode,
         "connections": {},
         "connections_by_token": {},
+        "created_ms": created_at,
+        "creator_claim_token": creator_claim_token,
+        "creator_claim_used": False,
+        "destroy_reason": None,
+        "destroyed": False,
+        "expires_at_ms": expires_at_ms,
+        "join_limit": int(join_limit),
+        "kernel": runtime.kernel,
+        "label": label,
+        "last_activity_ms": created_at,
+        "listener": None,
+        "next_connection_id": 1,
+        "os": runtime,
+        "room_admin_passphrase": room_admin_passphrase,
+        "room_id": room_id,
+        "room_kind": room_kind,
+        "session_open": False,
+        "started_ms": created_at,
+        "votes_visible": False,
     }
 
 
@@ -353,6 +379,14 @@ def _normalize_tab_id(value):
     return tab_id
 
 
+def _normalize_admin_passphrase(value):
+    """Normalize one room admin passphrase."""
+    text = str("" if value is None else value).strip()
+    if not text or len(text) > 128:
+        return None
+    return text
+
+
 def _now_ms(state):
     """Return the scheduler clock used for reconnect grace periods."""
     kernel = state.get("kernel")
@@ -364,6 +398,53 @@ def _now_ms(state):
 def _touch_activity(state):
     """Record that meaningful activity just occurred, resetting the idle clock."""
     state["last_activity_ms"] = _now_ms(state)
+
+
+def _room_has_expired(state, now_ms=None):
+    """Return whether one room has passed its hard expiry time."""
+    expires_at_ms = state.get("expires_at_ms")
+    if expires_at_ms is None:
+        return False
+    current_ms = _now_ms(state) if now_ms is None else now_ms
+    return current_ms >= expires_at_ms
+
+
+def _room_admin_passphrases(state):
+    """Return every passphrase that can unlock admin for one room."""
+    passphrases = []
+
+    if state.get("room_kind") == "premium":
+        premium_passphrase = _get_legalease_admin_passphrase()
+        if premium_passphrase:
+            passphrases.append(premium_passphrase)
+    else:
+        room_passphrase = state.get("room_admin_passphrase")
+        if room_passphrase:
+            passphrases.append(room_passphrase)
+
+    super_user_passphrase = _get_super_user_passphrase()
+    if super_user_passphrase and super_user_passphrase not in passphrases:
+        passphrases.append(super_user_passphrase)
+
+    return passphrases
+
+
+def _admin_auth_enabled(state):
+    """Report whether browser-side admin elevation is configured for one room."""
+    return bool(_room_admin_passphrases(state))
+
+
+def _admin_auth_help(state):
+    """Return the user-facing help text for the current room's admin flow."""
+    if not _admin_auth_enabled(state):
+        return "Admin access is not configured on this server."
+    if state.get("room_kind") == "premium":
+        if _get_super_user_passphrase():
+            return "Use the Legalease admin password or the super-user password to unlock session controls."
+        return "Use the Legalease admin password to unlock session controls."
+    if _get_super_user_passphrase():
+        return "Use the room admin password or the super-user password to unlock session controls."
+    return "Use the room admin password to unlock session controls."
 
 
 def _connected_count(state):
@@ -412,7 +493,7 @@ def _expire_stale_connections(state):
 def _connections_over_hard_cap(state):
     """Return True when the total connection record count is at the hard cap."""
     _expire_stale_connections(state)
-    return len(state.get("connections", {})) >= MAX_CONNECTIONS * 2
+    return len(state.get("connections", {})) >= _get_max_connections() * 2
 
 
 def _make_connection_record(state, client_addr, session_token=None, tab_id=None):
@@ -422,6 +503,7 @@ def _make_connection_record(state, client_addr, session_token=None, tab_id=None)
 
     record = {
         "addr": str(client_addr),
+        "admin_failures": 0,
         "client_id": client_id,
         "closed": False,
         "connected": False,
@@ -429,10 +511,10 @@ def _make_connection_record(state, client_addr, session_token=None, tab_id=None)
         "name": None,
         "outbox": [],
         "resume_deadline_ms": None,
+        "session_task": None,
         "session_token": session_token or _new_session_token(),
         "shutdown_after_drain": False,
         "socket": None,
-        "session_task": None,
         "tab_id": tab_id,
         "transport_id": 0,
         "vote": None,
@@ -553,8 +635,10 @@ def _build_public_state(state, viewer_id=None):
         )
 
     return {
-        "admin_auth_enabled": _admin_auth_enabled(),
+        "admin_auth_enabled": _admin_auth_enabled(state),
+        "admin_auth_help": _admin_auth_help(state),
         "connected_count": _connected_count(state),
+        "join_limit": int(state.get("join_limit", MAX_PARTICIPANTS)),
         "me": (
             {
                 "client_id": viewer["client_id"],
@@ -568,6 +652,10 @@ def _build_public_state(state, viewer_id=None):
         ),
         "participant_count": len(participants),
         "participants": participants,
+        "room_expires_at_ms": state.get("expires_at_ms"),
+        "room_id": state.get("room_id"),
+        "room_kind": state.get("room_kind"),
+        "room_label": state.get("label") or "",
         "server_time": datetime.now(timezone.utc).strftime("%H:%M:%SZ"),
         "session_open": bool(state["session_open"]),
         "vote_options": list(ALLOWED_VOTES),
@@ -669,6 +757,7 @@ def _kick_connection(state, target_connection):
 
     socket_obj = target_connection.get("socket")
     kernel = state.get("kernel")
+    target_connection["socket"] = None
     if socket_obj is None:
         return
 
@@ -692,8 +781,29 @@ def _clear_everyone(state):
     return len(participants)
 
 
+def _claim_creator_admin(state, connection, token):
+    """Promote one browser session to admin using a one-time creator token."""
+    expected = state.get("creator_claim_token")
+    if state.get("creator_claim_used") or not expected:
+        return "creator admin claim is no longer available"
+
+    supplied = _normalize_session_token(token)
+    if supplied is None or not hmac.compare_digest(supplied.encode(), expected.encode()):
+        return "creator admin claim token is invalid or expired"
+
+    state["creator_claim_used"] = True
+    state["creator_claim_token"] = None
+    connection["is_admin"] = True
+    _queue_notice(connection, "Creator admin access granted.", kind="success")
+    return None
+
+
 def _apply_client_message(state, connection, payload):
     """Apply one parsed client websocket message to the shared state."""
+    if state.get("destroyed"):
+        return "this room is no longer available"
+    if _room_has_expired(state):
+        return "this room has expired"
     if not isinstance(payload, dict):
         return "messages must be JSON objects"
 
@@ -705,26 +815,39 @@ def _apply_client_message(state, connection, payload):
             return "names must be between 1 and 32 characters"
         if not state["session_open"] and not connection.get("name") and not connection.get("is_admin"):
             return "joining is currently disabled by the administrator"
-        if not connection.get("name") and not connection.get("is_admin") and _joined_count(state) >= MAX_PARTICIPANTS:
-            return "this session is full (max {} participants)".format(MAX_PARTICIPANTS)
+        if not connection.get("name") and not connection.get("is_admin") and _joined_count(state) >= state.get("join_limit", MAX_PARTICIPANTS):
+            return "this session is full (max {} participants)".format(state.get("join_limit", MAX_PARTICIPANTS))
         connection["name"] = name
         _touch_activity(state)
         return None
 
+    if message_type == "claim_creator_admin":
+        token = payload.get("token")
+        result = _claim_creator_admin(state, connection, token)
+        if result is None:
+            _touch_activity(state)
+        return result
+
     if message_type == "become_admin":
-        expected = _get_admin_passphrase()
-        if not expected:
+        expected_passphrases = _room_admin_passphrases(state)
+        if not expected_passphrases:
             return "admin access is not configured on this server"
         failures = connection.get("admin_failures", 0)
         if failures >= MAX_ADMIN_FAILURES:
             return "too many failed attempts — reconnect to try again"
         supplied = str("" if payload.get("passphrase") is None else payload.get("passphrase"))
-        if not hmac.compare_digest(supplied.encode(), expected.encode()):
+        matched = False
+        for expected in expected_passphrases:
+            if hmac.compare_digest(supplied.encode(), expected.encode()):
+                matched = True
+                break
+        if not matched:
             connection["admin_failures"] = failures + 1
             return "incorrect admin passphrase"
         connection["admin_failures"] = 0
         connection["is_admin"] = True
         _queue_notice(connection, "Admin access granted.", kind="success")
+        _touch_activity(state)
         return None
 
     if message_type == "vote":
@@ -938,6 +1061,9 @@ __all__ = [
     "DEFAULT_HOST",
     "DEFAULT_PORT",
     "DOTENV_PATH",
+    "EPHEMERAL_JOIN_LIMIT",
+    "EPHEMERAL_ROOM_LIMIT",
+    "EPHEMERAL_ROOM_TTL_SECONDS",
     "HEADER_READ_TIMEOUT_SECONDS",
     "IDLE_TIMEOUT_SECONDS",
     "LISTEN_BACKLOG",
@@ -949,13 +1075,14 @@ __all__ = [
     "MESSAGE_RATE_BURST",
     "MESSAGE_RATE_LIMIT_MS",
     "OUTBOX_SIGNAL",
+    "PREMIUM_JOIN_LIMIT",
     "PROJECT_ROOT",
     "REQUEST_HEADER_LIMIT",
     "SESSION_RESUME_GRACE_SECONDS",
     "SMALLOS_ROOT",
-    "STATIC_ASSETS",
     "STATIC_DIR",
     "_admin_auth_enabled",
+    "_admin_auth_help",
     "_apply_client_message",
     "_attach_connection_transport",
     "_broadcast_state",
@@ -965,13 +1092,17 @@ __all__ = [
     "_build_state_message",
     "_clear_everyone",
     "_clear_votes",
+    "_claim_creator_admin",
     "_close_socket_quietly",
     "_connected_count",
     "_connections_over_hard_cap",
     "_expire_stale_connections",
     "_get_admin_passphrase",
     "_get_host",
+    "_get_legalease_admin_passphrase",
+    "_get_max_connections",
     "_get_port",
+    "_get_super_user_passphrase",
     "_http_reason",
     "_http_response",
     "_iter_participants",
@@ -983,6 +1114,7 @@ __all__ = [
     "_make_connection_record",
     "_new_session_token",
     "_new_state",
+    "_normalize_admin_passphrase",
     "_normalize_base_path",
     "_normalize_name",
     "_normalize_session_token",
@@ -1002,11 +1134,12 @@ __all__ = [
     "_read_static_asset",
     "_remove_connection_record",
     "_resolve_connection_for_socket",
+    "_room_admin_passphrases",
+    "_room_has_expired",
     "_send_all",
     "_set_session_open",
     "_shutdown_runtime",
     "_shutdown_state",
-    "_static_asset_response",
     "_strip_dotenv_comment",
     "_touch_activity",
     "websocket_writer_task",
