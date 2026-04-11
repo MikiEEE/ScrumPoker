@@ -222,6 +222,8 @@ function renderParticipants() {
   const participants = session.participants || [];
   const votesVisible = Boolean(session.votes_visible);
   const canKick = viewerIsAdmin();
+  const me = currentViewer();
+  const viewerId = me.client_id || null;
 
   if (!participants.length) {
     els.participantGrid.innerHTML = '<div class="empty-board">No one has joined the table yet.</div>';
@@ -231,16 +233,21 @@ function renderParticipants() {
   els.participantGrid.innerHTML = participants.map((participant) => {
     let voteChipClass = "vote-chip waiting";
     let voteChipContent = "\u2014";
+    const isSelf = viewerId !== null && participant.client_id === viewerId;
+    const selfHiddenVote = !votesVisible && isSelf ? me.vote : null;
 
     if (participant.vote !== null && participant.vote !== undefined) {
       voteChipClass = "vote-chip revealed";
       voteChipContent = escapeHtml(participant.vote === "coffee" ? "\u2615" : participant.vote);
+    } else if (selfHiddenVote !== null && selfHiddenVote !== undefined) {
+      voteChipClass = "vote-chip revealed";
+      voteChipContent = escapeHtml(selfHiddenVote === "coffee" ? "\u2615" : selfHiddenVote);
     } else if (participant.has_voted) {
       voteChipClass = "vote-chip voted";
       voteChipContent = "\u2713";
     }
 
-    const meta = participant.is_self
+    const meta = isSelf
       ? "You"
       : !participant.is_connected
         ? "Reconnecting\u2026"
@@ -249,12 +256,12 @@ function renderParticipants() {
           : "Deciding\u2026";
 
     const adminBadge = participant.is_admin ? '<span class="badge">Admin</span>' : "";
-    const kickButton = canKick && !participant.is_self
+    const kickButton = canKick && !isSelf
       ? '<button class="button-ghost kick-button" type="button" data-kick="' + participant.client_id + '" data-name="' + escapeHtml(participant.name) + '">Kick</button>'
       : "";
 
     return [
-      '<div class="participant-row' + (participant.is_self ? " self" : "") + '">',
+      '<div class="participant-row' + (isSelf ? " self" : "") + '">',
       '<div class="participant-avatar">' + escapeHtml(getInitials(participant.name)) + '</div>',
       '<div class="participant-info">',
       '<div class="participant-name-row">',
@@ -361,7 +368,9 @@ function connect() {
 
   socket.addEventListener("open", () => {
     appState.connected = true;
-    appState.statusLine = "Connected.";; scheduleKeepAlive(); render();
+    appState.statusLine = "Connected.";
+    scheduleKeepAlive();
+    render();
   });
 
   socket.addEventListener("message", (event) => {
@@ -375,18 +384,32 @@ function connect() {
     }
 
     if (message.type === "state") {
-      appState.session = message.state;
+      const priorSession = activeSession();
+      appState.session = Object.assign({}, priorSession, message.state, {
+        me: priorSession.me || null,
+      });
+      if (message.clear_error) {
+        clearFlash();
+      }
       appState.statusLine = message.state.session_open
         ? "Room is live and ready for the next estimate."
         : "Room is live, but joining is paused.";
-      if (message.state.me && message.state.me.session_token) {
-        window.sessionStorage.setItem(sessionTokenStorageKey, message.state.me.session_token);
+      render();
+      return;
+    }
+
+    if (message.type === "viewer_state") {
+      const me = message.me || null;
+      appState.session = Object.assign({}, activeSession(), { me });
+      clearFlash();
+      if (me && me.session_token) {
+        window.sessionStorage.setItem(sessionTokenStorageKey, me.session_token);
       }
-      if (message.state.me && message.state.me.name) {
-        window.localStorage.setItem(nameStorageKey, message.state.me.name);
-        els.nameInput.value = message.state.me.name;
+      if (me && me.name) {
+        window.localStorage.setItem(nameStorageKey, me.name);
+        els.nameInput.value = me.name;
       }
-      if (message.state.me && message.state.me.is_admin) {
+      if (me && me.is_admin) {
         appState.adminFormVisible = false;
         els.adminPassphraseInput.value = "";
       }
@@ -408,7 +431,9 @@ function connect() {
 
   socket.addEventListener("close", () => {
     appState.connected = false;
-    appState.statusLine = "Disconnected. Attempting to reconnect...";; cancelKeepAlive(); render();
+    appState.statusLine = "Disconnected. Attempting to reconnect...";
+    cancelKeepAlive();
+    render();
     window.setTimeout(connect, 1200);
   });
 
