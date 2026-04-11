@@ -25,6 +25,7 @@ PREMIUM_JOIN_LIMIT = 20
 EPHEMERAL_JOIN_LIMIT = 8
 EPHEMERAL_ROOM_LIMIT = 19
 EPHEMERAL_ROOM_TTL_SECONDS = 2 * 60 * 60
+EMPTY_EPHEMERAL_ROOM_TIMEOUT_SECONDS = 5 * 60
 MAX_PARTICIPANTS = PREMIUM_JOIN_LIMIT  # legacy default kept for callers that do not pass a room limit
 MAX_CONNECTIONS = 320  # default global transport cap across every active room
 MAX_ADMIN_FAILURES = 5  # per-connection lockout after this many wrong passphrase guesses
@@ -242,6 +243,7 @@ def _new_state(
         "creator_claim_used": False,
         "destroy_reason": None,
         "destroyed": False,
+        "empty_since_ms": created_at if room_kind == "ephemeral" else None,
         "expires_at_ms": expires_at_ms,
         "join_limit": int(join_limit),
         "kernel": runtime.kernel,
@@ -409,6 +411,34 @@ def _room_has_expired(state, now_ms=None):
     return current_ms >= expires_at_ms
 
 
+def _refresh_empty_since(state, now_ms=None):
+    """Track when an ephemeral room most recently became empty."""
+    if state.get("room_kind") != "ephemeral":
+        return None
+
+    current_ms = _now_ms(state) if now_ms is None else now_ms
+    joined_count = sum(
+        1 for connection in state.get("connections", {}).values() if connection.get("name") and not connection.get("closed")
+    )
+    if joined_count > 0:
+        state["empty_since_ms"] = None
+    elif state.get("empty_since_ms") is None:
+        state["empty_since_ms"] = current_ms
+    return state.get("empty_since_ms")
+
+
+def _room_has_been_empty_too_long(state, now_ms=None):
+    """Return whether an ephemeral room has been empty for too long."""
+    if state.get("room_kind") != "ephemeral":
+        return False
+
+    current_ms = _now_ms(state) if now_ms is None else now_ms
+    empty_since_ms = _refresh_empty_since(state, now_ms=current_ms)
+    if empty_since_ms is None:
+        return False
+    return current_ms - empty_since_ms >= EMPTY_EPHEMERAL_ROOM_TIMEOUT_SECONDS * 1000
+
+
 def _room_admin_passphrases(state):
     """Return every passphrase that can unlock admin for one room."""
     passphrases = []
@@ -474,6 +504,7 @@ def _remove_connection_record(state, connection):
     if state.get("connections", {}).get(connection.get("client_id")) is connection:
         del state["connections"][connection["client_id"]]
     connection["closed"] = True
+    _refresh_empty_since(state)
 
 
 def _expire_stale_connections(state):
@@ -818,6 +849,7 @@ def _apply_client_message(state, connection, payload):
         if not connection.get("name") and not connection.get("is_admin") and _joined_count(state) >= state.get("join_limit", MAX_PARTICIPANTS):
             return "this session is full (max {} participants)".format(state.get("join_limit", MAX_PARTICIPANTS))
         connection["name"] = name
+        _refresh_empty_since(state)
         _touch_activity(state)
         return None
 
@@ -1061,6 +1093,7 @@ __all__ = [
     "DEFAULT_HOST",
     "DEFAULT_PORT",
     "DOTENV_PATH",
+    "EMPTY_EPHEMERAL_ROOM_TIMEOUT_SECONDS",
     "EPHEMERAL_JOIN_LIMIT",
     "EPHEMERAL_ROOM_LIMIT",
     "EPHEMERAL_ROOM_TTL_SECONDS",
@@ -1133,8 +1166,10 @@ __all__ = [
     "_read_request_head",
     "_read_static_asset",
     "_remove_connection_record",
+    "_refresh_empty_since",
     "_resolve_connection_for_socket",
     "_room_admin_passphrases",
+    "_room_has_been_empty_too_long",
     "_room_has_expired",
     "_send_all",
     "_set_session_open",
