@@ -10,7 +10,7 @@ The app now runs one premium permanent room plus a pool of ephemeral GUID rooms 
 - Create ephemeral rooms from `/setupRoom`
 - Auto-claim admin in the room you just created
 - Promote yourself to admin with the room password or `SUPER_USER_PASSPHRASE`
-- Keep `/legalease` locked behind its premium admin password
+- Keep one configurable premium room locked behind its premium admin password
 - Cast point votes in real time
 - See when teammates have voted without revealing hidden values
 - Show or hide all votes on the board
@@ -37,7 +37,7 @@ From the project root:
 
 ```bash
 cp .env.example .env
-# edit .env and set LEGALEASE_ADMIN_PASSPHRASE / SUPER_USER_PASSPHRASE
+# edit .env and set PREMIUM_ROOM_* / SUPER_USER_PASSPHRASE
 # optionally change HOST / PORT
 python3 app.py
 ```
@@ -47,8 +47,10 @@ Then open:
 ```text
 http://127.0.0.1:8082/
 http://127.0.0.1:8082/setupRoom
-http://127.0.0.1:8082/legalease
+http://127.0.0.1:8082/premium
 ```
+
+If you set `PREMIUM_ROOM_SLUG=yourcompany`, that last URL becomes `http://127.0.0.1:8082/yourcompany`.
 
 If you leave `HOST=0.0.0.0`, the app binds on all local interfaces so other devices on your LAN can reach it using your machine's local IP address and the configured `PORT`.
 
@@ -60,8 +62,8 @@ Useful commands:
 
 - `poker rooms`: list the premium room and every active ephemeral GUID room
 - `poker apps`: alias for `poker rooms`
-- `poker legalease session open`: allow new users to join the `/legalease` board
-- `poker legalease session close`: prevent new users from joining the `/legalease` board
+- `poker premium session open`: allow new users to join the premium board when `PREMIUM_ROOM_SLUG=premium`
+- `poker premium session close`: prevent new users from joining the premium board when `PREMIUM_ROOM_SLUG=premium`
 - `poker <guid> session open|close|status|toggle`: manage an active ephemeral room
 - `poker <room_id> idle status`: inspect the idle timer for one room
 - `poker <room_id> clear everyone`: kick everyone off one room and close its session
@@ -89,11 +91,11 @@ Admins can:
 - Kick users off the board
 - Appear with an `Admin` badge beside their name
 
-The creator of a new ephemeral room is auto-promoted to admin in that browser session. Premium `/legalease` admin access uses `LEGALEASE_ADMIN_PASSPHRASE` with `ADMIN_PASSPHRASE` as a fallback, and `SUPER_USER_PASSPHRASE` works everywhere.
+The creator of a new ephemeral room is auto-promoted to admin in that browser session. Premium-room admin access uses `PREMIUM_ROOM_ADMIN_PASSPHRASE`, then falls back to `ADMIN_PASSPHRASE`, and `SUPER_USER_PASSPHRASE` works everywhere.
 
 Refreshing the page in the same tab keeps the same browser session token, so the user stays associated with the same name, vote, and admin status during reconnects. Separate tabs use separate tab identities so they do not fight over the same websocket session.
 
-Each GUID room and `/legalease` use different browser storage keys, so you can keep multiple rooms open in one browser without their names or reconnect tokens colliding.
+Each GUID room and the premium room use different browser storage keys, so you can keep multiple rooms open in one browser without their names or reconnect tokens colliding.
 
 While votes are hidden:
 
@@ -110,7 +112,7 @@ Ephemeral room limits:
 
 Premium room limits:
 
-- `/legalease` keeps its fixed URL
+- defaults to `/premium`, or whatever you set with `PREMIUM_ROOM_SLUG`
 - max `20` named participants
 
 ## Routes
@@ -119,10 +121,10 @@ Premium room limits:
 - `/setupRoom`: public room setup page
 - `/api/rooms`: create a new ephemeral room
 - `/healthz`: host health check
-- `/legalease`: premium room UI
-- `/legalease/ws`: premium room WebSocket endpoint
-- `/legalease/api/state`: premium room JSON snapshot
-- `/legalease/healthz`: premium room health check
+- `/premium`: default premium room UI
+- `/premium/ws`: default premium room WebSocket endpoint
+- `/premium/api/state`: default premium room JSON snapshot
+- `/premium/healthz`: default premium room health check
 - `/<guid>`: ephemeral room UI
 - `/<guid>/ws`: ephemeral room WebSocket endpoint
 - `/<guid>/api/state`: ephemeral room JSON snapshot
@@ -160,7 +162,7 @@ python3 -m unittest discover -s tests -v
 - [`scrum_poker_shell.py`](./scrum_poker_shell.py): SmallOS shell commands for premium and GUID rooms
 - [`benchmark_scrum_poker.py`](./benchmark_scrum_poker.py): lightweight benchmark for room fanout behavior
 - [`smallos_websocket_server.py`](./smallos_websocket_server.py): local SmallOS-friendly websocket server helper used by the app
-- [`.env.example`](./.env.example): sample environment file for premium admin, super-user access, and global limits
+- [`.env.example`](./.env.example): sample environment file for premium-room slug/label/admin settings, super-user access, and global limits
 - [`static/index.html`](./static/index.html): room page markup
 - [`static/landing.html`](./static/landing.html): public landing page
 - [`static/setup_room.html`](./static/setup_room.html): room setup page
