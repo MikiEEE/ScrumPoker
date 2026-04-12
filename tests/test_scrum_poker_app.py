@@ -65,10 +65,10 @@ def response_json(response):
 
 def build_host(runtime=None):
     runtime = runtime or FakeRuntime()
-    legalease_room = demo.build_premium_room(runtime)
-    host = demo.ScrumPokerHost([legalease_room], host="127.0.0.1", port=8082)
-    legalease_room.host = host
-    return runtime, host, legalease_room
+    premium_room = demo.build_premium_room(runtime)
+    host = demo.ScrumPokerHost([premium_room], host="127.0.0.1", port=8082)
+    premium_room.host = host
+    return runtime, host, premium_room
 
 
 def add_connection(room, name=None, is_admin=False, vote=None, connected=True, session_token=None, tab_id=None):
@@ -90,14 +90,15 @@ def add_connection(room, name=None, is_admin=False, vote=None, connected=True, s
 
 class TestPublicFlow(unittest.TestCase):
     def test_landing_and_setup_pages_are_served_by_host(self):
-        _, host, _ = build_host()
+        _, host, premium_room = build_host()
 
         landing = host.landing_response()
         setup = host.setup_room_response()
 
         self.assertIn(b"Create a private room", landing)
         self.assertIn(b"/setupRoom", landing)
-        self.assertIn(b"/yourcompany", landing)
+        self.assertIn(premium_room.base_path.encode("utf-8"), landing)
+        self.assertIn(premium_room.label.encode("utf-8"), landing)
         self.assertIn(b"Room admin password", setup)
         self.assertIn(b"/static/setup_room.js", setup)
 
@@ -129,12 +130,12 @@ class TestPublicFlow(unittest.TestCase):
         self.assertIn(b"503 Service Unavailable", response)
         self.assertEqual(demo.EPHEMERAL_ROOM_LIMIT, host.active_ephemeral_count())
 
-    def test_host_resolves_legalease_and_dynamic_guid_rooms(self):
-        _, host, legalease_room = build_host()
+    def test_host_resolves_premium_and_dynamic_guid_rooms(self):
+        _, host, premium_room = build_host()
         room, _ = host.create_ephemeral_room("room-secret")
 
-        self.assertIs(legalease_room, host.resolve_room("/legalease"))
-        self.assertIs(legalease_room, host.resolve_room("/legalease/ws"))
+        self.assertIs(premium_room, host.resolve_room(premium_room.base_path))
+        self.assertIs(premium_room, host.resolve_room(premium_room.ws_path))
         self.assertIs(room, host.resolve_room(room.base_path))
         self.assertIs(room, host.resolve_room(room.ws_path))
         self.assertIsNone(host.resolve_room("/"))
@@ -149,34 +150,58 @@ class TestPublicFlow(unittest.TestCase):
 
 
 class TestRoomAuthAndLimits(unittest.TestCase):
-    def test_legalease_uses_dedicated_passphrase_and_falls_back_to_legacy(self):
-        runtime, _, legalease_room = build_host()
-        legalease_room.state["session_open"] = True
-        connection = add_connection(legalease_room)
+    def test_premium_room_uses_dedicated_passphrase_and_falls_back_to_legacy(self):
+        runtime, _, premium_room = build_host()
+        premium_room.state["session_open"] = True
+        connection = add_connection(premium_room)
 
         with patch.dict(
             os.environ,
-            {"LEGALEASE_ADMIN_PASSPHRASE": "legal-only", "ADMIN_PASSPHRASE": "legacy", "SUPER_USER_PASSPHRASE": ""},
+            {"PREMIUM_ROOM_ADMIN_PASSPHRASE": "premium-only", "ADMIN_PASSPHRASE": "legacy", "SUPER_USER_PASSPHRASE": ""},
             clear=False,
         ):
             self.assertIsNone(
-                demo._apply_client_message(legalease_room.state, connection, {"type": "become_admin", "passphrase": "legal-only"})
+                demo._apply_client_message(premium_room.state, connection, {"type": "become_admin", "passphrase": "premium-only"})
             )
 
         self.assertTrue(connection["is_admin"])
         self.assertEqual([demo.OUTBOX_SIGNAL], connection["writer_task"].signals)
-        self.assertEqual(runtime.kernel.now_ms, legalease_room.state["last_activity_ms"])
+        self.assertEqual(runtime.kernel.now_ms, premium_room.state["last_activity_ms"])
 
-        fallback_connection = add_connection(legalease_room)
+        fallback_connection = add_connection(premium_room)
         with patch.dict(
             os.environ,
-            {"LEGALEASE_ADMIN_PASSPHRASE": "", "ADMIN_PASSPHRASE": "legacy", "SUPER_USER_PASSPHRASE": ""},
+            {
+                "PREMIUM_ROOM_ADMIN_PASSPHRASE": "",
+                "ADMIN_PASSPHRASE": "legacy",
+                "SUPER_USER_PASSPHRASE": "",
+            },
             clear=False,
         ):
             self.assertIsNone(
-                demo._apply_client_message(legalease_room.state, fallback_connection, {"type": "become_admin", "passphrase": "legacy"})
+                demo._apply_client_message(premium_room.state, fallback_connection, {"type": "become_admin", "passphrase": "legacy"})
             )
         self.assertTrue(fallback_connection["is_admin"])
+
+    def test_premium_room_uses_primary_admin_env_name(self):
+        _, _, premium_room = build_host()
+        premium_room.state["session_open"] = True
+        connection = add_connection(premium_room)
+
+        with patch.dict(
+            os.environ,
+            {"PREMIUM_ROOM_ADMIN_PASSPHRASE": "legacy-premium", "ADMIN_PASSPHRASE": ""},
+            clear=False,
+        ):
+            self.assertIsNone(
+                demo._apply_client_message(
+                    premium_room.state,
+                    connection,
+                    {"type": "become_admin", "passphrase": "legacy-premium"},
+                )
+            )
+
+        self.assertTrue(connection["is_admin"])
 
     def test_ephemeral_room_uses_room_password_not_legacy_admin_password(self):
         _, host, _ = build_host()
@@ -185,7 +210,7 @@ class TestRoomAuthAndLimits(unittest.TestCase):
 
         with patch.dict(
             os.environ,
-            {"ADMIN_PASSPHRASE": "legacy", "LEGALEASE_ADMIN_PASSPHRASE": "", "SUPER_USER_PASSPHRASE": ""},
+            {"ADMIN_PASSPHRASE": "legacy", "PREMIUM_ROOM_ADMIN_PASSPHRASE": "", "SUPER_USER_PASSPHRASE": ""},
             clear=False,
         ):
             error = demo._apply_client_message(room.state, connection, {"type": "become_admin", "passphrase": "legacy"})
@@ -197,22 +222,22 @@ class TestRoomAuthAndLimits(unittest.TestCase):
         self.assertTrue(connection["is_admin"])
 
     def test_super_user_passphrase_works_in_every_room(self):
-        _, host, legalease_room = build_host()
+        _, host, premium_room = build_host()
         room, _ = host.create_ephemeral_room("room-secret")
-        premium_connection = add_connection(legalease_room)
+        premium_connection = add_connection(premium_room)
         ephemeral_connection = add_connection(room)
 
         with patch.dict(
             os.environ,
             {
-                "LEGALEASE_ADMIN_PASSPHRASE": "legal-only",
+                "PREMIUM_ROOM_ADMIN_PASSPHRASE": "premium-only",
                 "ADMIN_PASSPHRASE": "",
                 "SUPER_USER_PASSPHRASE": "all-access",
             },
             clear=False,
         ):
             self.assertIsNone(
-                demo._apply_client_message(legalease_room.state, premium_connection, {"type": "become_admin", "passphrase": "all-access"})
+                demo._apply_client_message(premium_room.state, premium_connection, {"type": "become_admin", "passphrase": "all-access"})
             )
             self.assertIsNone(
                 demo._apply_client_message(room.state, ephemeral_connection, {"type": "become_admin", "passphrase": "all-access"})
@@ -234,18 +259,18 @@ class TestRoomAuthAndLimits(unittest.TestCase):
         error = demo._apply_client_message(room.state, another, {"type": "claim_creator_admin", "token": creator_claim_token})
         self.assertEqual("creator admin claim is no longer available", error)
 
-    def test_legalease_join_limit_is_20(self):
-        _, _, legalease_room = build_host()
-        legalease_room.state["session_open"] = True
+    def test_premium_room_join_limit_is_20(self):
+        _, _, premium_room = build_host()
+        premium_room.state["session_open"] = True
 
         for index in range(demo.PREMIUM_JOIN_LIMIT):
-            connection = add_connection(legalease_room)
+            connection = add_connection(premium_room)
             self.assertIsNone(
-                demo._apply_client_message(legalease_room.state, connection, {"type": "join", "name": "Legal {}".format(index)})
+                demo._apply_client_message(premium_room.state, connection, {"type": "join", "name": "Premium {}".format(index)})
             )
 
-        overflow = add_connection(legalease_room)
-        error = demo._apply_client_message(legalease_room.state, overflow, {"type": "join", "name": "Overflow"})
+        overflow = add_connection(premium_room)
+        error = demo._apply_client_message(premium_room.state, overflow, {"type": "join", "name": "Overflow"})
 
         self.assertEqual("this session is full (max 20 participants)", error)
 
@@ -350,33 +375,33 @@ class TestCleanupAndShell(unittest.TestCase):
         self.assertEqual("empty-timeout", room.state["destroy_reason"])
 
     def test_shell_lists_rooms_and_targets_dynamic_room(self):
-        _, host, legalease_room = build_host()
+        _, host, premium_room = build_host()
         room, _ = host.create_ephemeral_room("room-secret")
         room_connection = add_connection(room, name="Alice")
-        legalease_connection = add_connection(legalease_room, name="Bob")
+        premium_connection = add_connection(premium_room, name="Bob")
         room.state["session_open"] = True
-        legalease_room.state["session_open"] = True
+        premium_room.state["session_open"] = True
         shell = demo.ScrumPokerShell(host, allow_python=False)
 
         listed = shell.command_poker(["rooms"])
         response = shell.command_poker([room.room_id, "session", "close"])
 
         self.assertIn("Active scrum poker rooms:", listed)
-        self.assertIn("- legalease: /legalease [premium]", listed)
+        self.assertIn("- {}: {} [premium]".format(premium_room.app_id, premium_room.base_path), listed)
         self.assertIn(room.room_id, listed)
         self.assertEqual("{} joining disabled".format(room.room_id), response)
         self.assertFalse(room.state["session_open"])
-        self.assertTrue(legalease_room.state["session_open"])
+        self.assertTrue(premium_room.state["session_open"])
         self.assertEqual([demo.OUTBOX_SIGNAL], room_connection["writer_task"].signals)
-        self.assertEqual([], legalease_connection["writer_task"].signals)
+        self.assertEqual([], premium_connection["writer_task"].signals)
 
 
 class TestSharedHelpers(unittest.TestCase):
     def test_public_state_masks_other_votes_when_hidden(self):
-        _, _, legalease_room = build_host()
-        legalease_room.state["session_open"] = True
-        legalease_room.state["votes_visible"] = False
-        legalease_room.state["connections"] = {
+        _, _, premium_room = build_host()
+        premium_room.state["session_open"] = True
+        premium_room.state["votes_visible"] = False
+        premium_room.state["connections"] = {
             1: {
                 "client_id": 1,
                 "is_admin": True,
@@ -391,7 +416,7 @@ class TestSharedHelpers(unittest.TestCase):
             },
         }
 
-        snapshot = demo._build_public_state(legalease_room.state, viewer_id=1)
+        snapshot = demo._build_public_state(premium_room.state, viewer_id=1)
 
         self.assertTrue(snapshot["participants"][0]["is_admin"])
         self.assertEqual("5", snapshot["participants"][0]["vote"])
@@ -417,19 +442,19 @@ class TestSharedHelpers(unittest.TestCase):
         task_a = object()
         task_b = object()
         runtime = FakeRuntime(tasks=[task_a, task_b])
-        _, host, legalease_room = build_host(runtime=runtime)
+        _, host, premium_room = build_host(runtime=runtime)
         room, _ = host.create_ephemeral_room("room-secret")
         listener = object()
-        legalease_socket = object()
+        premium_socket = object()
         room_socket = object()
         host.listener = listener
-        legalease_room.state["connections"] = {
+        premium_room.state["connections"] = {
             1: {
                 "client_id": 1,
                 "connected": True,
                 "outbox": [],
                 "shutdown_after_drain": False,
-                "socket": legalease_socket,
+                "socket": premium_socket,
                 "websocket": object(),
             }
         }
@@ -444,10 +469,10 @@ class TestSharedHelpers(unittest.TestCase):
             }
         }
 
-        demo._shutdown_runtime(runtime, host, [legalease_room])
+        demo._shutdown_runtime(runtime, host, [premium_room])
 
         self.assertIsNone(host.listener)
-        self.assertEqual([listener, room_socket, legalease_socket], runtime.kernel.closed)
+        self.assertEqual([listener, room_socket, premium_socket], runtime.kernel.closed)
         self.assertEqual([(task_a, False), (task_b, False)], runtime.cancelled)
 
 

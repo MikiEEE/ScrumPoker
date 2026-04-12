@@ -39,7 +39,7 @@ ROOT_HTML_ROUTES = {
     "/": "landing.html",
     "/setupRoom": "setup_room.html",
 }
-RESERVED_SEGMENTS = {"", "api", "healthz", "legalease", "setupRoom", "static"}
+RESERVED_SEGMENTS = {"", "api", "healthz", "setupRoom", "static"}
 
 
 class ScrumPokerHost:
@@ -49,6 +49,7 @@ class ScrumPokerHost:
         self.fixed_rooms = list(fixed_rooms)
         self.fixed_rooms_by_id = {room.app_id: room for room in self.fixed_rooms}
         self.ephemeral_rooms = {}
+        self.reserved_segments = set(RESERVED_SEGMENTS) | set(self.fixed_rooms_by_id.keys())
         self.host = _get_host() if host is None else host
         self.port = _get_port() if port is None else port
         self.listener = None
@@ -120,13 +121,26 @@ class ScrumPokerHost:
             return _http_response(500, "static asset unavailable\n")
         return _http_response(200, body, content_type)
 
+    def _premium_room(self):
+        """Return the first fixed room, which is the configurable premium room."""
+        if not self.fixed_rooms:
+            return None
+        return self.fixed_rooms[0]
+
     def landing_response(self):
         """Return the public landing page."""
         try:
-            body = _read_static_asset(ROOT_HTML_ROUTES["/"])
+            body = _read_static_asset(ROOT_HTML_ROUTES["/"]).decode("utf-8")
         except OSError:
             return _http_response(500, "static asset unavailable\n")
-        return _http_response(200, body, "text/html; charset=utf-8")
+        premium_room = self._premium_room()
+        premium_path = premium_room.base_path if premium_room is not None else "/premium"
+        premium_label = premium_room.label if premium_room is not None else "Premium"
+        rendered = (
+            body.replace("{{PREMIUM_ROOM_PATH}}", premium_path)
+            .replace("{{PREMIUM_ROOM_LABEL}}", premium_label)
+        )
+        return _http_response(200, rendered, "text/html; charset=utf-8")
 
     def setup_room_response(self):
         """Return the room setup page."""
@@ -148,7 +162,7 @@ class ScrumPokerHost:
         """Generate one non-reserved room GUID."""
         while True:
             room_id = str(uuid.uuid4())
-            if room_id not in self.ephemeral_rooms and room_id not in RESERVED_SEGMENTS:
+            if room_id not in self.ephemeral_rooms and room_id not in self.reserved_segments:
                 return room_id
 
     def create_ephemeral_room(self, admin_passphrase, task=None):
@@ -340,7 +354,7 @@ class ScrumPokerHost:
             if room is None:
                 if method == "GET":
                     first_segment = self._first_path_segment(path)
-                    if first_segment not in RESERVED_SEGMENTS and "/" not in path.strip("/"):
+                    if first_segment not in self.reserved_segments and "/" not in path.strip("/"):
                         await _send_all(task, client_sock, self.room_unavailable_response())
                         return
                 await _send_all(task, client_sock, _http_response(404, "route not found\n"))
@@ -390,7 +404,12 @@ class ScrumPokerHost:
 
         task.OS.print("smallOS scrum poker running on http://{}:{}/\n".format(self.host, self.port))
         task.OS.print("routes: {}\n".format(self.route_summary()))
-        task.OS.print("Open the shell and use: poker rooms | poker legalease session open | poker <guid> session open\n")
+        premium_room_id = self.fixed_rooms[0].app_id if self.fixed_rooms else "premium"
+        task.OS.print(
+            "Open the shell and use: poker rooms | poker {} session open | poker <guid> session open\n".format(
+                premium_room_id
+            )
+        )
 
         try:
             while True:
