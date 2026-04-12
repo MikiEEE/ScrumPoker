@@ -194,7 +194,7 @@ class ScrumPokerHost:
         self.ephemeral_rooms[room_id] = room
         if task is not None:
             room.room_task = task.spawn(
-                room.to_task(),
+                room.make_watchdog_task(),
                 priority=2,
             )
         return room, creator_claim_token

@@ -130,8 +130,8 @@ class ScrumPokerApp:
             _build_route(self.base_path, "static/app.js"): ("app.js", "application/javascript; charset=utf-8"),
         }
 
-    def to_task(self):
-        """Return the per-room SmallOS supervisor task."""
+    def make_watchdog_task(self):
+        """Return the per-room SmallOS idle-watchdog task."""
         return SmallTask(
             2,
             idle_watchdog_task,
