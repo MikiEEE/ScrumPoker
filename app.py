@@ -13,13 +13,14 @@ __all__ = list(_core_exports) + ["ScrumPokerApp", "ScrumPokerHost", "ScrumPokerS
 
 
 def build_premium_room(runtime):
-    """Create the permanent premium Legalease room."""
+    """Create the permanent configurable premium room."""
+    premium_slug = _get_premium_room_slug()
     return ScrumPokerApp(
-        "legalease",
-        "/legalease",
+        premium_slug,
+        "/{}".format(premium_slug),
         runtime,
         title="Sprint Poker",
-        label="Legalease",
+        label=_get_premium_room_label(),
         room_kind="premium",
         join_limit=PREMIUM_JOIN_LIMIT,
         admin_auth_mode="premium",
@@ -29,15 +30,15 @@ def build_premium_room(runtime):
 def main():
     """Start the premium + ephemeral SmallOS scrum poker runtime."""
     runtime = _build_runtime()
-    legalease_room = build_premium_room(runtime)
-    host = ScrumPokerHost([legalease_room], host=_get_host(), port=_get_port())
-    legalease_room.host = host
+    premium_room = build_premium_room(runtime)
+    host = ScrumPokerHost([premium_room], host=_get_host(), port=_get_port())
+    premium_room.host = host
 
     shell = ScrumPokerShell(host, prompt="poker> ", allow_python=False)
     runtime.shells.append(shell.setOS(runtime))
 
     host_task = host.to_task()
-    room_tasks = [legalease_room.to_task()]
+    room_tasks = [premium_room.to_task()]
     shell_stdin = shell.make_task(
         priority=1,
         name="shell_stdin",
@@ -45,7 +46,9 @@ def main():
         poll_interval=0.1,
         banner_text=(
             "\nInteractive scrum poker shell enabled.\n"
-            "Commands: poker rooms, poker legalease session open, poker <guid> session open, ps, stat <pid>, toggle, help\n"
+            "Commands: poker rooms, poker {} session open, poker <guid> session open, ps, stat <pid>, toggle, help\n".format(
+                premium_room.app_id
+            )
         ),
         force_output=True,
     )
@@ -65,7 +68,7 @@ def main():
         if shell_stdin.exception is not None and not isinstance(shell_stdin.exception, TaskCancelledError):
             raise shell_stdin.exception
     finally:
-        _shutdown_runtime(runtime, host, [legalease_room])
+        _shutdown_runtime(runtime, host, [premium_room])
 
 
 if __name__ == "__main__":

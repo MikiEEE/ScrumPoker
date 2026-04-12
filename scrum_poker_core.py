@@ -3,6 +3,7 @@
 import hmac
 import json
 import os
+import re
 import secrets
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlsplit
@@ -15,6 +16,8 @@ from SmallOS.SmallPackage.SmallOS import SmallOS as SmallOSRuntime
 
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8082
+DEFAULT_PREMIUM_ROOM_LABEL = "Premium"
+DEFAULT_PREMIUM_ROOM_SLUG = "premium"
 LISTEN_BACKLOG = 24
 REQUEST_HEADER_LIMIT = 8 * 1024
 HEADER_READ_TIMEOUT_SECONDS = 10  # close slow-loris connections after this many seconds
@@ -175,9 +178,32 @@ def _get_admin_passphrase():
     return os.environ.get("ADMIN_PASSPHRASE", "").strip()
 
 
-def _get_legalease_admin_passphrase():
-    """Return the premium Legalease admin passphrase."""
-    return os.environ.get("LEGALEASE_ADMIN_PASSPHRASE", "").strip() or _get_admin_passphrase()
+def _slugify_room_segment(value, default):
+    """Normalize one configured room slug into a safe single path segment."""
+    text = str("" if value is None else value).strip().strip("/")
+    text = re.sub(r"[^A-Za-z0-9_-]+", "-", text).strip("-_").lower()
+    return text or str(default)
+
+
+def _get_premium_room_slug():
+    """Return the configured premium room URL slug."""
+    return _slugify_room_segment(os.environ.get("PREMIUM_ROOM_SLUG", DEFAULT_PREMIUM_ROOM_SLUG), DEFAULT_PREMIUM_ROOM_SLUG)
+
+
+def _get_premium_room_label():
+    """Return the configured premium room display label."""
+    label = str(os.environ.get("PREMIUM_ROOM_LABEL", "")).strip()
+    if label:
+        return label
+    return _get_premium_room_slug().replace("-", " ").replace("_", " ").title() or DEFAULT_PREMIUM_ROOM_LABEL
+
+
+def _get_premium_room_admin_passphrase():
+    """Return the premium room admin passphrase, keeping legacy env fallback."""
+    return (
+        os.environ.get("PREMIUM_ROOM_ADMIN_PASSPHRASE", "").strip()
+        or _get_admin_passphrase()
+    )
 
 
 def _get_super_user_passphrase():
@@ -444,7 +470,7 @@ def _room_admin_passphrases(state):
     passphrases = []
 
     if state.get("room_kind") == "premium":
-        premium_passphrase = _get_legalease_admin_passphrase()
+        premium_passphrase = _get_premium_room_admin_passphrase()
         if premium_passphrase:
             passphrases.append(premium_passphrase)
     else:
@@ -469,9 +495,12 @@ def _admin_auth_help(state):
     if not _admin_auth_enabled(state):
         return "Admin access is not configured on this server."
     if state.get("room_kind") == "premium":
+        premium_label = _get_premium_room_label()
         if _get_super_user_passphrase():
-            return "Use the Legalease admin password or the super-user password to unlock session controls."
-        return "Use the Legalease admin password to unlock session controls."
+            return "Use the {} admin password or the super-user password to unlock session controls.".format(
+                premium_label
+            )
+        return "Use the {} admin password to unlock session controls.".format(premium_label)
     if _get_super_user_passphrase():
         return "Use the room admin password or the super-user password to unlock session controls."
     return "Use the room admin password to unlock session controls."
@@ -1092,6 +1121,8 @@ __all__ = [
     "CONFIG_PATH",
     "DEFAULT_HOST",
     "DEFAULT_PORT",
+    "DEFAULT_PREMIUM_ROOM_LABEL",
+    "DEFAULT_PREMIUM_ROOM_SLUG",
     "DOTENV_PATH",
     "EMPTY_EPHEMERAL_ROOM_TIMEOUT_SECONDS",
     "EPHEMERAL_JOIN_LIMIT",
@@ -1132,9 +1163,11 @@ __all__ = [
     "_expire_stale_connections",
     "_get_admin_passphrase",
     "_get_host",
-    "_get_legalease_admin_passphrase",
     "_get_max_connections",
     "_get_port",
+    "_get_premium_room_admin_passphrase",
+    "_get_premium_room_label",
+    "_get_premium_room_slug",
     "_get_super_user_passphrase",
     "_http_reason",
     "_http_response",
