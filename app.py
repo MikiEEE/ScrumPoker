@@ -38,7 +38,7 @@ def main():
     runtime.shells.append(shell.setOS(runtime))
 
     host_task = host.to_task()
-    room_tasks = [premium_room.to_task()]
+    room_tasks = [legalease_room.make_watchdog_task()]
     shell_stdin = shell.make_task(
         priority=1,
         name="shell_stdin",
