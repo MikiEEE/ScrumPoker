@@ -58,6 +58,7 @@ function cancelKeepAlive() {
 const nameStorageKey = bootstrap.storageKeyPrefix + "-name";
 const sessionTokenStorageKey = bootstrap.storageKeyPrefix + "-session-token";
 const tabIdStorageKey = bootstrap.storageKeyPrefix + "-tab-id";
+const joinPanelExpandedStorageKey = bootstrap.storageKeyPrefix + "-join-panel-expanded";
 const creatorClaimStorageKey = bootstrap.creatorClaimStorageKey || "";
 
 const appState = {
@@ -81,6 +82,12 @@ const els = {
   clearVotesButton: document.getElementById("clearVotesButton"),
   closeSessionButton: document.getElementById("closeSessionButton"),
   connectedCount: document.getElementById("connectedCount"),
+  joinPanelBody: document.getElementById("joinPanelBody"),
+  joinPanelCollapsed: document.getElementById("joinPanelCollapsed"),
+  joinPanelCollapsedText: document.getElementById("joinPanelCollapsedText"),
+  joinPanelCollapsedTitle: document.getElementById("joinPanelCollapsedTitle"),
+  joinPanelExpandButton: document.getElementById("joinPanelExpandButton"),
+  joinPanelToggleButton: document.getElementById("joinPanelToggleButton"),
   joinButton: document.getElementById("joinButton"),
   joinForm: document.getElementById("joinForm"),
   joinHelp: document.getElementById("joinHelp"),
@@ -177,6 +184,23 @@ function viewerIsAdmin() {
 
 function viewerHasJoined() {
   return Boolean(currentViewer().name);
+}
+
+function joinPanelShouldBeExpanded(joined, isAdmin) {
+  if (!joined && !isAdmin) {
+    return true;
+  }
+
+  const storedValue = window.localStorage.getItem(joinPanelExpandedStorageKey);
+  if (storedValue === null) {
+    return false;
+  }
+
+  return storedValue === "true";
+}
+
+function setJoinPanelExpanded(expanded) {
+  window.localStorage.setItem(joinPanelExpandedStorageKey, expanded ? "true" : "false");
 }
 
 function currentVoteOptions() {
@@ -316,6 +340,9 @@ function renderSession() {
   const isAdmin = viewerIsAdmin();
   const adminAvailable = Boolean(session.admin_auth_enabled);
   const joinLimit = session.join_limit || participants.length || 0;
+  const joinPanelExpanded = joinPanelShouldBeExpanded(joined, isAdmin);
+  const canToggleJoinPanel = joined || isAdmin;
+  const showCollapsedJoinPanel = canToggleJoinPanel && !joinPanelExpanded;
 
   els.sessionStatus.textContent = sessionOpen ? "Joining is open" : "Joining is paused";
   els.sessionStatus.className = "session-status " + (sessionOpen ? "open" : "closed");
@@ -331,6 +358,20 @@ function renderSession() {
   els.clearVotesButton.disabled = !appState.connected;
   els.socketChip.textContent = appState.connected ? "Socket connected" : "Socket reconnecting";
   els.socketChip.className = "status-chip" + (appState.connected ? "" : " offline");
+  els.joinPanelBody.hidden = showCollapsedJoinPanel;
+  els.joinPanelCollapsed.hidden = !showCollapsedJoinPanel;
+  els.joinPanelToggleButton.hidden = !canToggleJoinPanel || showCollapsedJoinPanel;
+  els.joinPanelToggleButton.textContent = showCollapsedJoinPanel ? "Show join panel" : "Hide join panel";
+  els.joinPanelCollapsedTitle.textContent = joined
+    ? "Joined as " + me.name + "."
+    : isAdmin
+      ? "Admin mode enabled."
+      : "Ready when you are.";
+  els.joinPanelCollapsedText.textContent = joined
+    ? "The join controls are tucked away, but still available if you want to update your name or use admin features."
+    : isAdmin
+      ? "The join controls are tucked away, but you can reopen them any time as an admin."
+      : "The join controls are tucked away.";
 
   if (joined) {
     els.joinHelp.textContent = "You are joined as " + me.name + ". Votes stay hidden until someone reveals them.";
@@ -446,6 +487,7 @@ function connect() {
 els.joinForm.addEventListener("submit", (event) => {
   event.preventDefault();
   send({ type: "join", name: els.nameInput.value.trim() });
+  setJoinPanelExpanded(false);
 });
 
 els.adminUnlockButton.addEventListener("click", () => {
@@ -454,6 +496,17 @@ els.adminUnlockButton.addEventListener("click", () => {
   if (appState.adminFormVisible) {
     els.adminPassphraseInput.focus();
   }
+});
+
+els.joinPanelToggleButton.addEventListener("click", () => {
+  setJoinPanelExpanded(false);
+  render();
+});
+
+els.joinPanelExpandButton.addEventListener("click", () => {
+  setJoinPanelExpanded(true);
+  render();
+  els.nameInput.focus();
 });
 
 els.adminAuthCancelButton.addEventListener("click", () => {
