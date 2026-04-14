@@ -50,58 +50,74 @@
       </div>
     </header>
 
-    <section class="layout">
-      <aside class="stack">
-        <section class="panel">
-          <h2>Join The Table</h2>
-          <form class="join-form" id="joinForm">
-            <label class="field-label" for="nameInput">Display name</label>
-            <input id="nameInput" name="name" type="text" maxlength="32" placeholder="Ada Lovelace" autocomplete="name">
-            <div class="button-row">
-              <button type="submit" id="joinButton">Join Session</button>
-              <button id="adminUnlockButton" class="button-secondary" type="button">Become Admin</button>
-            </div>
+    <section class="panel join-panel" id="joinPanel">
+      <div class="join-panel-header">
+        <div class="join-panel-copy">
+          <h2>Join the Table</h2>
+          <p class="join-panel-text">Enter a name to join and vote.</p>
+        </div>
+        <button type="button" class="button-secondary join-panel-toggle" id="joinPanelToggleButton" hidden>Hide</button>
+      </div>
+
+      <div class="join-panel-collapsed" id="joinPanelCollapsed" hidden>
+        <div class="join-panel-collapsed-copy">
+          <div class="join-panel-collapsed-title" id="joinPanelCollapsedTitle">Ready when you are.</div>
+          <div class="join-panel-collapsed-text" id="joinPanelCollapsedText">The join controls are tucked away.</div>
+        </div>
+        <button type="button" class="button-secondary join-panel-toggle" id="joinPanelExpandButton">Show join panel</button>
+      </div>
+
+      <div class="join-panel-body" id="joinPanelBody">
+        <div class="join-bar">
+          <span class="join-bar-label">Quick join</span>
+          <div class="join-bar-rule"></div>
+          <form class="join-bar-form" id="joinForm">
+            <input id="nameInput" name="name" type="text" maxlength="32" placeholder="Display name…" autocomplete="name">
+            <button type="submit" id="joinButton">Join Session</button>
+            <button id="adminUnlockButton" class="button-secondary" type="button">Become Admin</button>
           </form>
-
-          <div class="admin-auth-panel" id="adminAuthPanel" hidden>
-            <form class="join-form" id="adminAuthForm">
-              <label class="field-label" for="adminPassphraseInput">Admin passphrase</label>
-              <input id="adminPassphraseInput" name="admin_passphrase" type="password" maxlength="128"
-                placeholder="Enter passphrase" autocomplete="current-password">
-              <div class="button-row">
-                <button type="submit" id="adminAuthSubmitButton">Unlock Admin</button>
-                <button id="adminAuthCancelButton" class="button-secondary" type="button">Cancel</button>
-              </div>
-            </form>
-          </div>
-
-          <div class="status-row">
+          <div class="join-bar-chips">
             <span class="status-chip" id="socketChip">Socket connected</span>
             <span class="status-chip admin-chip" id="adminChip" hidden>Admin enabled</span>
           </div>
-          <p class="help-text" id="joinHelp">The terminal shell can still open or close joining with
-            <code>__SHELL_OPEN_COMMAND__</code> and <code>__SHELL_CLOSE_COMMAND__</code>.
-          </p>
-          <p class="muted" id="adminStatus">Admin controls are available for this room when admin auth is configured.</p>
+        </div>
 
-          <div class="admin-controls-inline" id="adminControlsPanel" hidden>
-            <div class="panel-divider"></div>
-            <h2>Session Controls</h2>
-            <div class="button-row">
+        <p class="join-meta-text" id="joinHelp">The terminal shell can still open or close joining with
+          <code>__SHELL_OPEN_COMMAND__</code> and <code>__SHELL_CLOSE_COMMAND__</code>.
+        </p>
+        <p class="join-meta-text" id="adminStatus">Admin controls are available for this room when admin auth is configured.</p>
+
+        <div class="admin-auth-panel" id="adminAuthPanel" hidden>
+          <form class="join-bar-form" id="adminAuthForm">
+            <input id="adminPassphraseInput" name="admin_passphrase" type="password" maxlength="128"
+              placeholder="Admin passphrase…" autocomplete="current-password">
+            <button type="submit" id="adminAuthSubmitButton">Unlock Admin</button>
+            <button id="adminAuthCancelButton" class="button-secondary" type="button">Cancel</button>
+          </form>
+        </div>
+
+        <div class="admin-controls-inline" id="adminControlsPanel" hidden>
+          <div class="panel-divider"></div>
+          <div class="join-bar">
+            <span class="join-bar-label">Session Controls</span>
+            <div class="join-bar-rule"></div>
+            <div class="join-bar-form">
               <button type="button" id="openSessionButton">Open Session</button>
               <button type="button" id="closeSessionButton" class="button-danger">Close Session</button>
             </div>
           </div>
-        </section>
+        </div>
+      </div>
+    </section>
+
+    <section class="layout">
+      <aside class="panel vote-aside">
+        <h2>Your Vote</h2>
+        <div class="muted" id="voteSummary">Join the session to cast a vote.</div>
+        <div class="vote-grid" id="voteGrid"></div>
       </aside>
 
-      <main class="panel">
-        <div class="vote-section">
-          <h2>Your Vote</h2>
-          <div class="muted" id="voteSummary">Join the session to cast a vote.</div>
-          <div class="vote-grid" id="voteGrid"></div>
-        </div>
-
+      <main class="panel board-main">
         <div id="noticeArea" class="notice-strip"></div>
 
         <div class="board-meta">
