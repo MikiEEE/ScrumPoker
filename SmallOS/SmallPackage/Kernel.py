@@ -218,6 +218,33 @@ class Kernel:
 	def io_wait(self, readables, writables, timeout_ms=None):
 		return [], []
 
+	def validate_io_wait_object(self, obj):
+		"""
+		Return whether ``obj`` still looks safe to hand to poll/select.
+
+		Closed sockets on CPython typically report ``fileno() == -1`` after close.
+		Letting those reach ``select.poll().register(...)`` crashes the runtime
+		with ``ValueError`` before the waiting task can be resumed or cleaned up.
+		"""
+		if obj is None:
+			return False, ValueError('I/O wait object cannot be None.')
+		if isinstance(obj, int):
+			if obj < 0:
+				return False, ValueError(
+					'I/O wait object has invalid file descriptor ({}).'.format(obj)
+				)
+			return True, None
+		if hasattr(obj, 'fileno'):
+			try:
+				fd = obj.fileno()
+			except Exception as exc:
+				return False, exc
+			if isinstance(fd, int) and fd < 0:
+				return False, ValueError(
+					'I/O wait object has invalid file descriptor ({}).'.format(fd)
+				)
+		return True, None
+
 	def resolve_address(self, host, port):
 		return None
 
