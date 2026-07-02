@@ -103,9 +103,86 @@ async def hello(task):
 
 config = SmallOSConfig.from_json_file("smallos.config.json")
 runtime = SmallOS(config=config).setKernel(Unix())
+runtime.setErrorHandler(
+    lambda event: print(
+        "[smallOS] task failure in {} (PID {}): {}".format(
+            event["task_name"] or "unnamed task",
+            event["task_id"],
+            event["exception_repr"],
+        )
+    )
+)
 runtime.fork([SmallTask(2, hello, name="hello")])
 runtime.startOS()
 ```
+
+## Runtime Error Handling
+
+`smallOS` now supports a runtime-level error observer through
+`runtime.setErrorHandler(handler, include_cancelled=False)`.
+
+Use it when you want:
+- readable debug output for uncaught task failures
+- lightweight cleanup or bookkeeping at the runtime boundary
+- a single place to surface task errors without crashing the scheduler
+
+The handler is synchronous and receives a failure-event dictionary after the
+task has been finalized. Current event fields include:
+- `task_id`
+- `task_name`
+- `parent_id`
+- `exception`
+- `exception_type`
+- `exception_repr`
+- `is_cancelled`
+- `blocked_reason`
+- `waiting_signal`
+- `io_wait_mode`
+- `join_target_id`
+- `join_pending_ids`
+- `traceback_text`
+
+By default, `TaskCancelledError` does not trigger the handler. Pass
+`include_cancelled=True` if you want cancellation events too.
+
+Example:
+
+```python
+from SmallPackage.Kernel import Unix
+from SmallPackage.SmallOS import SmallOS
+
+
+def log_runtime_error(event):
+    print(
+        "[smallOS] task failure in {} (PID {}): {}".format(
+            event["task_name"] or "unnamed task",
+            event["task_id"],
+            event["exception_repr"],
+        )
+    )
+    if event["traceback_text"]:
+        print(event["traceback_text"], end="")
+
+
+runtime = SmallOS().setKernel(Unix())
+runtime.setErrorHandler(log_runtime_error)
+```
+
+### Closed or Invalid File Descriptors
+
+Closed or invalid file descriptors used in `wait_readable(...)` or
+`wait_writable(...)` no longer crash the whole scheduler through the platform
+poll/select layer.
+
+Instead:
+- the kernel validates the watched object before polling
+- the waiting task receives a normal exception such as `ValueError`
+- the runtime finalizes that task cleanly
+- your runtime error handler can log or clean up the failure gracefully
+
+If you do not install an error handler, the task still fails cleanly and the
+runtime keeps its internal state consistent, but adding `setErrorHandler(...)`
+is the recommended way to make these failures visible in applications.
 
 ## Configuration
 
@@ -200,6 +277,12 @@ The new demos live in [demos](demos):
   cooperative single-thread web app demo with HTTP routes, live browser UI, and shell-driven server shutdown
 - [demos/mqtt_demo.py](demos/mqtt_demo.py):
   MQTT example built on the native cooperative client
+
+All of the shared demo entry points now install a default runtime error handler
+through [demos/common.py](demos/common.py). That means network failures,
+invalid I/O wait objects, and other uncaught task exceptions are reported as
+readable task-failure diagnostics instead of looking like abrupt scheduler
+crashes or silent exits.
 
 The original root demo remains available in
 [demo.py](demo.py) as a compatibility wrapper around
