@@ -1,5 +1,7 @@
 # Scrum Poker App
 
+[![Tests](https://github.com/MikiEEE/ScrumPoker/actions/workflows/tests.yml/badge.svg)](https://github.com/MikiEEE/ScrumPoker/actions/workflows/tests.yml)
+
 A websocket scrum poker web app built on top of the `SmallOS` framework.
 
 The app now runs one premium permanent room plus a pool of ephemeral GUID rooms on one cooperative SmallOS runtime. A shared host task owns the listener, public landing/setup flow, room registry, and expiry cleanup.
@@ -12,6 +14,8 @@ The app now runs one premium permanent room plus a pool of ephemeral GUID rooms 
 - Promote yourself to admin with the room password or `SUPER_USER_PASSPHRASE`
 - Keep one configurable premium room locked behind its premium admin password
 - Cast point votes in real time
+- Switch between point voting and 128-character short answers as an admin
+- Mark short answers Ready or Not Ready before revealing them
 - See when teammates have voted without revealing hidden values
 - Show or hide all votes on the board
 - Discard the current round's votes
@@ -87,6 +91,7 @@ Users can:
 - Enter a display name and join the session
 - Click `Become Admin`, enter the room password, and receive success or failure feedback
 - Vote using the on-screen cards
+- Enter a short answer and explicitly mark it Ready when the room is in short-answer mode
 - See who has already voted
 - Reveal or hide the board
 - Clear the current round
@@ -96,6 +101,7 @@ Admins can:
 - Open the session for new users
 - Close the session for new users
 - Kick users off the board
+- Switch the room between Pointing and Short Answer modes
 - Appear with an `Admin` badge beside their name
 
 The creator of a new ephemeral room is auto-promoted to admin in that browser session. Premium-room admin access uses `PREMIUM_ROOM_ADMIN_PASSPHRASE`, then falls back to `ADMIN_PASSPHRASE`, and `SUPER_USER_PASSPHRASE` works everywhere.
@@ -140,6 +146,8 @@ Premium room limits:
 - `/<room>/static/app.css` and `/<room>/static/app.js`: room assets
 
 ## Tests
+
+The lightweight GitHub Actions workflow in [`.github/workflows/tests.yml`](./.github/workflows/tests.yml) runs on pushes to `master`, pull requests, and manual dispatches. It installs the pinned SmallOS dependency, runs the focused test suite, checks Python and JavaScript syntax, and validates the generated documentation index.
 
 Focused scrum poker tests:
 

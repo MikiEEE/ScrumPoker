@@ -63,6 +63,8 @@ const creatorClaimStorageKey = bootstrap.creatorClaimStorageKey || "";
 
 const appState = {
   adminFormVisible: false,
+  answerDraft: "",
+  answerDraftDirty: false,
   connected: false,
   flash: null,
   session: null,
@@ -94,13 +96,18 @@ const els = {
   nameInput: document.getElementById("nameInput"),
   noticeArea: document.getElementById("noticeArea"),
   openSessionButton: document.getElementById("openSessionButton"),
+  pointingModeButton: document.getElementById("pointingModeButton"),
   participantCount: document.getElementById("participantCount"),
   participantGrid: document.getElementById("participantGrid"),
   serverTime: document.getElementById("serverTime"),
+  shortAnswerModeButton: document.getElementById("shortAnswerModeButton"),
   sessionStatus: document.getElementById("sessionStatus"),
   socketChip: document.getElementById("socketChip"),
   statusLine: document.getElementById("statusLine"),
   toggleVotesButton: document.getElementById("toggleVotesButton"),
+  responsePanelTitle: document.getElementById("responsePanelTitle"),
+  responsesCastLabel: document.getElementById("responsesCastLabel"),
+  roundFooter: document.getElementById("roundFooter"),
   voteGrid: document.getElementById("voteGrid"),
   voteSummary: document.getElementById("voteSummary"),
   votesCast: document.getElementById("votesCast"),
@@ -230,6 +237,11 @@ function maybeClearCreatorClaimToken(me) {
 }
 
 function renderVotes() {
+  const session = activeSession();
+  if (session.response_mode === "short_answer") {
+    renderShortAnswer();
+    return;
+  }
   const selectedVote = currentViewer().vote || null;
   const joined = viewerHasJoined();
 
@@ -251,6 +263,27 @@ function renderVotes() {
   }
 }
 
+function renderShortAnswer() {
+  const me = currentViewer();
+  const joined = viewerHasJoined();
+  const isReady = Boolean(me.is_ready);
+  els.responsePanelTitle.textContent = "Your Answer";
+  els.voteGrid.innerHTML = [
+    '<div class="answer-ready-actions">',
+    '<button type="button" data-answer-ready="true"' + (joined ? "" : " disabled") + '>Ready</button>',
+    '<button type="button" class="button-secondary" data-answer-ready="false"' + (joined && isReady ? "" : " disabled") + '>Not Ready</button>',
+    '</div>',
+  ].join("");
+
+  if (!joined) {
+    els.voteSummary.textContent = "Join the session to answer.";
+  } else if (isReady) {
+    els.voteSummary.textContent = "Your answer is ready. Select Not Ready to edit it.";
+  } else {
+    els.voteSummary.textContent = "Type your answer on the board, then select Ready.";
+  }
+}
+
 function getInitials(name) {
   const parts = name.trim().split(/\s+/);
   if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
@@ -261,6 +294,9 @@ function renderParticipants() {
   const session = activeSession();
   const participants = session.participants || [];
   const canKick = viewerIsAdmin();
+  const activeAnswerInput = document.activeElement && document.activeElement.id === "shortAnswerInput";
+  const answerSelectionStart = activeAnswerInput ? document.activeElement.selectionStart : null;
+  const answerSelectionEnd = activeAnswerInput ? document.activeElement.selectionEnd : null;
 
   if (!participants.length) {
     els.participantGrid.innerHTML = '<div class="empty-board">No one has joined the table yet.</div>';
@@ -271,10 +307,16 @@ function renderParticipants() {
     let voteChipClass = "vote-chip waiting";
     let voteChipContent = "\u2014";
 
-    if (participant.vote !== null && participant.vote !== undefined) {
+    const shortAnswerMode = session.response_mode === "short_answer";
+    const hasResponse = shortAnswerMode ? participant.is_ready : participant.has_voted;
+
+    if (shortAnswerMode && participant.short_answer !== null && participant.short_answer !== undefined) {
+      voteChipClass = "vote-chip revealed answer-revealed";
+      voteChipContent = escapeHtml(participant.short_answer);
+    } else if (!shortAnswerMode && participant.vote !== null && participant.vote !== undefined) {
       voteChipClass = "vote-chip revealed";
       voteChipContent = escapeHtml(participant.vote === "coffee" ? "\u2615" : participant.vote);
-    } else if (participant.has_voted) {
+    } else if (hasResponse) {
       voteChipClass = "vote-chip voted";
       voteChipContent = "\u2713";
     }
@@ -283,14 +325,24 @@ function renderParticipants() {
       ? "You"
       : !participant.is_connected
         ? "Reconnecting\u2026"
-        : participant.has_voted
+        : hasResponse
           ? (session.votes_visible ? "Revealed" : "Voted")
-          : "Deciding\u2026";
+          : (shortAnswerMode ? "Not ready" : "Deciding\u2026");
+
+    const responseMeta = shortAnswerMode && hasResponse && !session.votes_visible ? "Ready" : meta;
 
     const adminBadge = participant.is_admin ? '<span class="badge">Admin</span>' : "";
     const kickButton = canKick && !participant.is_self
       ? '<button class="button-ghost kick-button" type="button" data-kick="' + participant.client_id + '" data-name="' + escapeHtml(participant.name) + '">Kick</button>'
       : "";
+    const responseControl = shortAnswerMode && participant.is_self
+      ? [
+        '<div class="participant-answer-editor">',
+        '<textarea id="shortAnswerInput" maxlength="128" rows="2" placeholder="Type a short answer…" aria-label="Your short answer"' + (participant.is_ready ? " disabled" : "") + '>' + escapeHtml(appState.answerDraft) + '</textarea>',
+        '<div class="answer-counter"><span id="answerCharacterCount">' + appState.answerDraft.length + '</span>/128</div>',
+        '</div>',
+      ].join("")
+      : '<div class="' + voteChipClass + '">' + voteChipContent + '</div>';
 
     return [
       '<div class="participant-row' + (participant.is_self ? " self" : "") + '">',
@@ -300,13 +352,21 @@ function renderParticipants() {
       '<span class="participant-name">' + escapeHtml(participant.name) + '</span>',
       adminBadge,
       '</div>',
-      '<span class="participant-meta">' + escapeHtml(meta) + '</span>',
+      '<span class="participant-meta">' + escapeHtml(responseMeta) + '</span>',
       '</div>',
       kickButton,
-      '<div class="' + voteChipClass + '">' + voteChipContent + '</div>',
+      responseControl,
       '</div>',
     ].join("");
   }).join("");
+
+  if (activeAnswerInput) {
+    const restoredInput = document.getElementById("shortAnswerInput");
+    if (restoredInput && !restoredInput.disabled) {
+      restoredInput.focus();
+      restoredInput.setSelectionRange(answerSelectionStart, answerSelectionEnd);
+    }
+  }
 }
 
 function renderNotice() {
@@ -323,11 +383,21 @@ function renderNotice() {
   }
 
   if (viewerHasJoined()) {
-    els.noticeArea.innerHTML = buildNotice("Live round ready. You can vote, reveal the board, or discard the current round.", "info");
+    els.noticeArea.innerHTML = buildNotice(
+      session.response_mode === "short_answer"
+        ? "Live round ready. Write an answer, mark it ready, or reveal the board."
+        : "Live round ready. You can vote, reveal the board, or discard the current round.",
+      "info"
+    );
     return;
   }
 
-  els.noticeArea.innerHTML = buildNotice("Pick a display name to join the table and start voting.", "info");
+  els.noticeArea.innerHTML = buildNotice(
+    session.response_mode === "short_answer"
+      ? "Pick a display name to join the table and answer."
+      : "Pick a display name to join the table and start voting.",
+    "info"
+  );
 }
 
 function renderSession() {
@@ -335,7 +405,8 @@ function renderSession() {
   const sessionOpen = session.session_open !== false;
   const participants = session.participants || [];
   const me = currentViewer();
-  const votesCast = participants.filter((participant) => participant.has_voted).length;
+  const shortAnswerMode = session.response_mode === "short_answer";
+  const votesCast = participants.filter((participant) => shortAnswerMode ? participant.is_ready : participant.has_voted).length;
   const joined = viewerHasJoined();
   const isAdmin = viewerIsAdmin();
   const adminAvailable = Boolean(session.admin_auth_enabled);
@@ -349,12 +420,20 @@ function renderSession() {
   els.statusLine.textContent = appState.statusLine;
   els.participantCount.textContent = String(session.participant_count || 0);
   els.votesCast.textContent = String(votesCast);
+  els.responsesCastLabel.textContent = shortAnswerMode ? "ready" : "voted";
+  els.roundFooter.textContent = shortAnswerMode
+    ? "Hidden rounds show who is ready without exposing their answer."
+    : "Hidden rounds show who voted without exposing the value.";
+  els.responsePanelTitle.textContent = shortAnswerMode ? "Your Answer" : "Your Vote";
   els.connectedCount.textContent = String(session.connected_count || 0);
   els.serverTime.textContent = session.server_time || "-";
   els.joinButton.disabled = !appState.connected || (!sessionOpen && !joined && !isAdmin);
   els.joinButton.textContent = joined ? "Update Name" : "Join Session";
   els.toggleVotesButton.disabled = !appState.connected;
-  els.toggleVotesButton.textContent = session.votes_visible ? "Hide Votes" : "Show Votes";
+  els.toggleVotesButton.textContent = session.votes_visible
+    ? (shortAnswerMode ? "Hide Answers" : "Hide Votes")
+    : (shortAnswerMode ? "Reveal Answers" : "Show Votes");
+  els.clearVotesButton.textContent = shortAnswerMode ? "Clear Answers" : "Discard Votes";
   els.clearVotesButton.disabled = !appState.connected;
   els.socketChip.textContent = appState.connected ? "Socket connected" : "Socket reconnecting";
   els.socketChip.className = "status-chip" + (appState.connected ? "" : " offline");
@@ -374,7 +453,7 @@ function renderSession() {
       : "The join controls are tucked away.";
 
   if (joined) {
-    els.joinHelp.textContent = "You are joined as " + me.name + ". Votes stay hidden until someone reveals them.";
+    els.joinHelp.textContent = "You are joined as " + me.name + ". " + (shortAnswerMode ? "Answers" : "Votes") + " stay hidden until someone reveals them.";
   } else if (sessionOpen) {
     els.joinHelp.textContent = "Joining is open. This room supports up to " + joinLimit + " named participants.";
   } else {
@@ -384,9 +463,9 @@ function renderSession() {
   if (!participants.length) {
     els.boardSummary.textContent = "Waiting for the first participant.";
   } else if (session.votes_visible) {
-    els.boardSummary.textContent = "Votes are revealed for " + participants.length + " participant(s).";
+    els.boardSummary.textContent = (shortAnswerMode ? "Answers" : "Votes") + " are revealed for " + participants.length + " participant(s).";
   } else {
-    els.boardSummary.textContent = votesCast + " of " + participants.length + " participant(s) have voted.";
+    els.boardSummary.textContent = votesCast + " of " + participants.length + " participant(s) " + (shortAnswerMode ? "are ready." : "have voted.");
   }
 
   els.adminUnlockButton.hidden = !adminAvailable || isAdmin;
@@ -395,6 +474,8 @@ function renderSession() {
   els.adminControlsPanel.hidden = !isAdmin;
   els.openSessionButton.disabled = !appState.connected || !isAdmin || sessionOpen;
   els.closeSessionButton.disabled = !appState.connected || !isAdmin || !sessionOpen;
+  els.pointingModeButton.disabled = !appState.connected || !isAdmin || !shortAnswerMode;
+  els.shortAnswerModeButton.disabled = !appState.connected || !isAdmin || shortAnswerMode;
 
   if (!adminAvailable) {
     els.adminStatus.textContent = "Admin access is not configured on this server.";
@@ -435,7 +516,17 @@ function connect() {
     }
 
     if (message.type === "state") {
+      const previousMode = appState.session && appState.session.response_mode;
+      const previousRoundId = appState.session && appState.session.round_id;
       appState.session = message.state;
+      const nextMode = message.state.response_mode || "pointing";
+      if (previousMode !== nextMode || (previousRoundId !== undefined && previousRoundId !== message.state.round_id)) {
+        appState.answerDraft = "";
+        appState.answerDraftDirty = false;
+      }
+      if (nextMode === "short_answer" && !appState.answerDraftDirty && message.state.me && message.state.me.short_answer) {
+        appState.answerDraft = message.state.me.short_answer;
+      }
       appState.statusLine = message.state.session_open
         ? "Room is live and ready for the next estimate."
         : "Room is live, but joining is paused.";
@@ -521,6 +612,16 @@ els.adminAuthForm.addEventListener("submit", (event) => {
 });
 
 els.voteGrid.addEventListener("click", (event) => {
+  const readyTarget = event.target.closest("[data-answer-ready]");
+  if (readyTarget) {
+    if (readyTarget.getAttribute("data-answer-ready") === "true") {
+      send({ type: "submit_short_answer", answer: appState.answerDraft });
+      appState.answerDraftDirty = false;
+    } else {
+      send({ type: "set_answer_ready", ready: false });
+    }
+    return;
+  }
   const target = event.target.closest("[data-vote]");
   if (!target) {
     return;
@@ -528,11 +629,23 @@ els.voteGrid.addEventListener("click", (event) => {
   send({ type: "vote", value: target.getAttribute("data-vote") });
 });
 
+els.participantGrid.addEventListener("input", (event) => {
+  if (event.target.id !== "shortAnswerInput") return;
+  appState.answerDraft = event.target.value.slice(0, 128);
+  appState.answerDraftDirty = true;
+  const counter = document.getElementById("answerCharacterCount");
+  if (counter) counter.textContent = String(appState.answerDraft.length);
+});
+
 els.toggleVotesButton.addEventListener("click", () => {
   send({ type: "toggle_votes" });
 });
 
 els.clearVotesButton.addEventListener("click", () => {
+  if (activeSession().response_mode === "short_answer") {
+    appState.answerDraft = "";
+    appState.answerDraftDirty = false;
+  }
   send({ type: "clear_votes" });
 });
 
@@ -542,6 +655,14 @@ els.openSessionButton.addEventListener("click", () => {
 
 els.closeSessionButton.addEventListener("click", () => {
   send({ type: "set_session_open", open: false });
+});
+
+els.pointingModeButton.addEventListener("click", () => {
+  send({ type: "set_response_mode", mode: "pointing" });
+});
+
+els.shortAnswerModeButton.addEventListener("click", () => {
+  send({ type: "set_response_mode", mode: "short_answer" });
 });
 
 els.participantGrid.addEventListener("click", (event) => {

@@ -24,7 +24,7 @@
         <span class="header-sep">·</span>
         <span class="header-stat"><span id="participantCount">0</span> participants</span>
         <span class="header-sep">·</span>
-        <span class="header-stat"><span id="votesCast">0</span> voted</span>
+        <span class="header-stat"><span id="votesCast">0</span> <span id="responsesCastLabel">voted</span></span>
         <!-- kept in DOM for JS; not displayed -->
         <span hidden id="connectedCount">0</span>
         <span hidden id="serverTime">-</span>
@@ -99,6 +99,14 @@
         <div class="admin-controls-inline" id="adminControlsPanel" hidden>
           <div class="panel-divider"></div>
           <div class="join-bar">
+            <span class="join-bar-label">Response Mode</span>
+            <div class="join-bar-rule"></div>
+            <div class="mode-switch" role="group" aria-label="Response mode">
+              <button type="button" id="pointingModeButton" class="button-secondary">Pointing</button>
+              <button type="button" id="shortAnswerModeButton" class="button-secondary">Short Answer</button>
+            </div>
+          </div>
+          <div class="join-bar">
             <span class="join-bar-label">Session Controls</span>
             <div class="join-bar-rule"></div>
             <div class="join-bar-form">
@@ -112,7 +120,7 @@
 
     <section class="layout">
       <aside class="panel vote-aside">
-        <h2>Your Vote</h2>
+        <h2 id="responsePanelTitle">Your Vote</h2>
         <div class="muted" id="voteSummary">Join the session to cast a vote.</div>
         <div class="vote-grid" id="voteGrid"></div>
       </aside>
@@ -131,7 +139,7 @@
           </div>
         </div>
         <div class="participant-grid" id="participantGrid"></div>
-        <div class="footer">Hidden rounds show who voted without exposing the value.</div>
+        <div class="footer" id="roundFooter">Hidden rounds show who voted without exposing the value.</div>
       </main>
     </section>
   </div>

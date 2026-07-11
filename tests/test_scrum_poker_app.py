@@ -397,6 +397,91 @@ class TestCleanupAndShell(unittest.TestCase):
 
 
 class TestSharedHelpers(unittest.TestCase):
+    def test_short_answer_mode_requires_admin_and_clears_the_round(self):
+        _, _, room = build_host()
+        admin = add_connection(room, name="Admin", is_admin=True, vote="5")
+        participant = add_connection(room, name="Alice", vote="8")
+
+        error = demo._apply_client_message(
+            room.state, participant, {"type": "set_response_mode", "mode": "short_answer"}
+        )
+        self.assertEqual("admin privileges required", error)
+
+        self.assertIsNone(
+            demo._apply_client_message(room.state, admin, {"type": "set_response_mode", "mode": "short_answer"})
+        )
+        self.assertEqual("short_answer", room.state["response_mode"])
+        self.assertIsNone(admin["vote"])
+        self.assertIsNone(participant["vote"])
+        self.assertEqual(1, room.state["round_id"])
+        self.assertFalse(room.state["votes_visible"])
+
+    def test_short_answer_ready_and_not_ready_flow(self):
+        _, _, room = build_host()
+        room.state["response_mode"] = "short_answer"
+        participant = add_connection(room, name="Alice")
+
+        self.assertIsNone(
+            demo._apply_client_message(
+                room.state, participant, {"type": "submit_short_answer", "answer": "A concise answer"}
+            )
+        )
+        self.assertTrue(participant["answer_ready"])
+        self.assertEqual("A concise answer", participant["short_answer"])
+
+        self.assertIsNone(
+            demo._apply_client_message(room.state, participant, {"type": "set_answer_ready", "ready": False})
+        )
+        self.assertFalse(participant["answer_ready"])
+        self.assertIsNone(participant["short_answer"])
+
+    def test_short_answer_enforces_128_character_limit(self):
+        _, _, room = build_host()
+        room.state["response_mode"] = "short_answer"
+        participant = add_connection(room, name="Alice")
+
+        self.assertIsNone(
+            demo._apply_client_message(
+                room.state, participant, {"type": "submit_short_answer", "answer": "a" * 128}
+            )
+        )
+        error = demo._apply_client_message(
+            room.state, participant, {"type": "submit_short_answer", "answer": "a" * 129}
+        )
+        self.assertEqual("answers must be between 1 and 128 characters", error)
+        self.assertEqual("a" * 128, participant["short_answer"])
+
+    def test_short_answers_are_private_until_revealed(self):
+        _, _, room = build_host()
+        room.state["response_mode"] = "short_answer"
+        alice = add_connection(room, name="Alice")
+        bob = add_connection(room, name="Bob")
+        alice["short_answer"] = "Alice's answer"
+        alice["answer_ready"] = True
+        bob["short_answer"] = "Bob's answer"
+        bob["answer_ready"] = True
+
+        hidden = demo._build_public_state(room.state, viewer_id=alice["client_id"])
+        self.assertEqual("Alice's answer", hidden["participants"][0]["short_answer"])
+        self.assertIsNone(hidden["participants"][1]["short_answer"])
+        self.assertTrue(hidden["participants"][1]["is_ready"])
+
+        room.state["votes_visible"] = True
+        revealed = demo._build_public_state(room.state, viewer_id=alice["client_id"])
+        self.assertEqual("Bob's answer", revealed["participants"][1]["short_answer"])
+
+    def test_clearing_answers_resets_readiness_and_advances_round(self):
+        _, _, room = build_host()
+        room.state["response_mode"] = "short_answer"
+        participant = add_connection(room, name="Alice")
+        participant["short_answer"] = "Ready answer"
+        participant["answer_ready"] = True
+
+        self.assertIsNone(demo._apply_client_message(room.state, participant, {"type": "clear_votes"}))
+        self.assertIsNone(participant["short_answer"])
+        self.assertFalse(participant["answer_ready"])
+        self.assertEqual(1, room.state["round_id"])
+
     def test_public_state_masks_other_votes_when_hidden(self):
         _, _, premium_room = build_host()
         premium_room.state["session_open"] = True
