@@ -31,6 +31,7 @@ EMPTY_EPHEMERAL_ROOM_TIMEOUT_SECONDS = 5 * 60
 MAX_PARTICIPANTS = PREMIUM_JOIN_LIMIT  # legacy default kept for callers that do not pass a room limit
 MAX_CONNECTIONS = 320  # default global transport cap across every active room
 MAX_ADMIN_FAILURES = 5  # per-connection lockout after this many wrong passphrase guesses
+MAX_SHORT_ANSWER_LENGTH = 128
 MESSAGE_RATE_LIMIT_MS = 50  # minimum ms between processed messages per connection (~20/sec)
 MESSAGE_RATE_BURST = 100  # disconnect after this many back-to-back throttled messages
 ALLOWED_VOTES = (
@@ -279,6 +280,8 @@ def _new_state(
         "room_admin_passphrase": room_admin_passphrase,
         "room_id": room_id,
         "room_kind": room_kind,
+        "response_mode": "pointing",
+        "round_id": 0,
         "session_open": False,
         "started_ms": created_at,
         "votes_visible": False,
@@ -576,6 +579,8 @@ def _make_connection_record(state, client_addr, session_token=None, tab_id=None)
         "tab_id": tab_id,
         "transport_id": 0,
         "vote": None,
+        "short_answer": None,
+        "answer_ready": False,
         "websocket": None,
         "writer_task": None,
     }
@@ -677,18 +682,22 @@ def _build_public_state(state, viewer_id=None):
     for connection in _iter_participants(state):
         is_self = connection["client_id"] == viewer_id
         vote_value = connection.get("vote")
+        short_answer = connection.get("short_answer")
         if not state["votes_visible"] and not is_self:
             vote_value = None
+            short_answer = None
 
         participants.append(
             {
                 "client_id": connection["client_id"],
                 "has_voted": connection.get("vote") is not None,
+                "is_ready": bool(connection.get("answer_ready")),
                 "is_admin": bool(connection.get("is_admin")),
                 "is_connected": bool(connection.get("connected", True)),
                 "is_self": is_self,
                 "name": connection["name"],
                 "vote": vote_value,
+                "short_answer": short_answer if connection.get("answer_ready") else None,
             }
         )
 
@@ -704,6 +713,8 @@ def _build_public_state(state, viewer_id=None):
                 "name": viewer.get("name"),
                 "session_token": viewer.get("session_token"),
                 "vote": viewer.get("vote"),
+                "is_ready": bool(viewer.get("answer_ready")),
+                "short_answer": viewer.get("short_answer") if viewer.get("answer_ready") else None,
             }
             if viewer is not None
             else None
@@ -713,6 +724,8 @@ def _build_public_state(state, viewer_id=None):
         "room_expires_at_ms": state.get("expires_at_ms"),
         "room_id": state.get("room_id"),
         "room_kind": state.get("room_kind"),
+        "response_mode": state.get("response_mode", "pointing"),
+        "round_id": int(state.get("round_id", 0)),
         "room_label": state.get("label") or "",
         "server_time": datetime.now(timezone.utc).strftime("%H:%M:%SZ"),
         "session_open": bool(state["session_open"]),
@@ -763,10 +776,23 @@ def _queue_notice(connection, message, kind="info"):
 
 
 def _clear_votes(state):
-    """Discard all active votes and collapse the board back to hidden mode."""
+    """Discard all active responses and collapse the board back to hidden mode."""
     for connection in state["connections"].values():
         connection["vote"] = None
+        connection["short_answer"] = None
+        connection["answer_ready"] = False
     state["votes_visible"] = False
+    state["round_id"] = int(state.get("round_id", 0)) + 1
+
+
+def _normalize_short_answer(value):
+    """Normalize a submitted short answer, enforcing the room's character limit."""
+    if not isinstance(value, str):
+        return None
+    answer = value.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not answer or len(answer) > MAX_SHORT_ANSWER_LENGTH:
+        return None
+    return answer
 
 
 def _set_session_open(state, is_open):
@@ -912,11 +938,55 @@ def _apply_client_message(state, connection, payload):
     if message_type == "vote":
         if not connection.get("name"):
             return "join the session before voting"
+        if state.get("response_mode", "pointing") != "pointing":
+            return "point votes are only available in pointing mode"
         vote = _normalize_vote(payload.get("value"))
         if vote is None:
             return "unsupported vote value"
         connection["vote"] = vote
         _touch_activity(state)
+        return None
+
+    if message_type == "submit_short_answer":
+        if not connection.get("name"):
+            return "join the session before submitting an answer"
+        if state.get("response_mode", "pointing") != "short_answer":
+            return "short answers are only available in short answer mode"
+        answer = _normalize_short_answer(payload.get("answer"))
+        if answer is None:
+            return "answers must be between 1 and {} characters".format(MAX_SHORT_ANSWER_LENGTH)
+        connection["short_answer"] = answer
+        connection["answer_ready"] = True
+        _touch_activity(state)
+        return None
+
+    if message_type == "set_answer_ready":
+        if not connection.get("name"):
+            return "join the session before changing answer readiness"
+        if state.get("response_mode", "pointing") != "short_answer":
+            return "answer readiness is only available in short answer mode"
+        if payload.get("ready") is not False:
+            return "use submit_short_answer to mark an answer ready"
+        connection["short_answer"] = None
+        connection["answer_ready"] = False
+        _touch_activity(state)
+        return None
+
+    if message_type == "set_response_mode":
+        if not connection.get("is_admin"):
+            return "admin privileges required"
+        mode = payload.get("mode")
+        if mode not in ("pointing", "short_answer"):
+            return "response mode must be pointing or short_answer"
+        if state.get("response_mode", "pointing") != mode:
+            state["response_mode"] = mode
+            _clear_votes(state)
+            _touch_activity(state)
+            _queue_notice(
+                connection,
+                "Room switched to {} mode.".format("short answer" if mode == "short_answer" else "pointing"),
+                kind="success",
+            )
         return None
 
     if message_type == "toggle_votes":
@@ -1134,6 +1204,7 @@ __all__ = [
     "MAX_FRAME_SIZE",
     "MAX_MESSAGE_SIZE",
     "MAX_PARTICIPANTS",
+    "MAX_SHORT_ANSWER_LENGTH",
     "MESSAGE_RATE_BURST",
     "MESSAGE_RATE_LIMIT_MS",
     "OUTBOX_SIGNAL",
@@ -1175,6 +1246,7 @@ __all__ = [
     "_kick_connection",
     "_load_dotenv_file",
     "_make_connection_record",
+    "_normalize_short_answer",
     "_new_session_token",
     "_new_state",
     "_normalize_admin_passphrase",

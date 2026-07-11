@@ -488,6 +488,43 @@ input[type="password"] {
   transition: border-color 160ms ease, background 160ms ease;
 }
 
+textarea {
+  width: 100%;
+  min-width: 0;
+  resize: vertical;
+  padding: 11px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  font: inherit;
+  line-height: 1.4;
+  outline: none;
+}
+
+textarea:focus {
+  border-color: rgba(255, 159, 67, 0.6);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.mode-switch,
+.answer-ready-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.answer-ready-actions button {
+  flex: 1 1 100%;
+}
+
+.answer-counter {
+  color: var(--muted);
+  font-size: 0.74rem;
+  text-align: right;
+}
+
+
 input[type="text"]:focus,
 input[type="password"]:focus {
   border-color: rgba(255, 159, 67, 0.6);
@@ -864,6 +901,36 @@ button:disabled {
   font-size: 0.9rem;
 }
 
+.vote-chip.answer-revealed {
+  width: min(320px, 45%);
+  min-width: 120px;
+  height: auto;
+  min-height: 40px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+.participant-answer-editor {
+  width: min(420px, 55%);
+  min-width: 220px;
+  display: grid;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+.participant-answer-editor textarea {
+  min-height: 58px;
+  resize: vertical;
+}
+
+.participant-answer-editor textarea:disabled {
+  opacity: 0.78;
+  cursor: not-allowed;
+}
+
 .badge {
   display: inline-flex;
   align-items: center;
@@ -986,6 +1053,17 @@ button:disabled {
 
   .join-bar-label {
     width: 100%;
+  }
+
+  .participant-row {
+    flex-wrap: wrap;
+  }
+
+  .participant-answer-editor,
+  .vote-chip.answer-revealed {
+    width: 100%;
+    min-width: 0;
+    margin-left: 38px;
   }
 
   .join-bar-form {
