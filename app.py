@@ -1,6 +1,6 @@
 """Cooperative websocket scrum poker app built on top of SmallOS."""
 
-from SmallOS.SmallPackage.SmallErrors import TaskCancelledError
+from SmallPackage.SmallErrors import TaskCancelledError
 
 from scrum_poker_app import ScrumPokerApp
 from scrum_poker_core import *  # noqa: F401,F403 - preserve the existing helper surface for tests and callers

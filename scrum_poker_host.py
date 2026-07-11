@@ -3,7 +3,7 @@
 import json
 import uuid
 
-from SmallOS.SmallPackage import SmallTask
+from SmallPackage import SmallTask
 
 from scrum_poker_app import ScrumPokerApp
 from scrum_poker_core import (

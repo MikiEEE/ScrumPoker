@@ -1,6 +1,6 @@
 """Shell commands for premium and ephemeral scrum poker rooms."""
 
-from SmallOS.SmallPackage.shells import BaseShell, ShellCommandError
+from SmallPackage.shells import BaseShell, ShellCommandError
 
 from scrum_poker_core import IDLE_TIMEOUT_SECONDS, _clear_everyone, _now_ms, _touch_activity
 

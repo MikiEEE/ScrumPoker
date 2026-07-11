@@ -8,10 +8,9 @@ import secrets
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlsplit
 
-import SmallOS
-from SmallOS.SmallPackage import Unix
-from SmallOS.SmallPackage.SmallConfig import SmallOSConfig
-from SmallOS.SmallPackage.SmallOS import SmallOS as SmallOSRuntime
+from SmallPackage import Unix
+from SmallPackage.SmallConfig import SmallOSConfig
+from SmallPackage.SmallOS import SmallOS as SmallOSRuntime
 
 
 DEFAULT_HOST = "0.0.0.0"
@@ -51,8 +50,7 @@ ALLOWED_VOTES = (
     "coffee",
 )
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-SMALLOS_ROOT = next(iter(SmallOS.__path__))
-CONFIG_PATH = os.path.join(SMALLOS_ROOT, "smallos.config.json")
+CONFIG_PATH = os.path.join(PROJECT_ROOT, "smallos.config.json")
 DOTENV_PATH = os.path.join(PROJECT_ROOT, ".env")
 STATIC_DIR = os.path.join(PROJECT_ROOT, "static")
 SESSION_RESUME_GRACE_SECONDS = 45  # how long a disconnected participant's slot is held before they're removed from the board
@@ -1143,7 +1141,6 @@ __all__ = [
     "PROJECT_ROOT",
     "REQUEST_HEADER_LIMIT",
     "SESSION_RESUME_GRACE_SECONDS",
-    "SMALLOS_ROOT",
     "STATIC_DIR",
     "_admin_auth_enabled",
     "_admin_auth_help",
