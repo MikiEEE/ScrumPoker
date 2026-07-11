@@ -1,6 +1,6 @@
 # Scrum Poker App
 
-A websocket scrum poker web app built on top of the included `SmallOS` framework.
+A websocket scrum poker web app built on top of the `SmallOS` framework.
 
 The app now runs one premium permanent room plus a pool of ephemeral GUID rooms on one cooperative SmallOS runtime. A shared host task owns the listener, public landing/setup flow, room registry, and expiry cleanup.
 
@@ -28,8 +28,15 @@ The app now runs one premium permanent room plus a pool of ephemeral GUID rooms 
 ## Requirements
 
 - Python 3
+- Git (used by `pip` to install SmallOS from GitHub)
 
-No extra dependencies are required for the scrum poker app itself.
+Install the Python dependencies before running the app:
+
+```bash
+python3 -m pip install -r requirements.txt
+```
+
+SmallOS is pinned to a specific upstream commit in `requirements.txt` so installs are reproducible.
 
 ## Run The App
 
@@ -146,13 +153,6 @@ Local benchmark helper:
 python3 benchmark_scrum_poker.py
 ```
 
-Full SmallOS test suite:
-
-```bash
-cd SmallOS
-python3 -m unittest discover -s tests -v
-```
-
 ## Project Structure
 
 - [`app.py`](./app.py): executable SmallOS entrypoint and premium-room composition
@@ -162,6 +162,8 @@ python3 -m unittest discover -s tests -v
 - [`scrum_poker_shell.py`](./scrum_poker_shell.py): SmallOS shell commands for premium and GUID rooms
 - [`benchmark_scrum_poker.py`](./benchmark_scrum_poker.py): lightweight benchmark for room fanout behavior
 - [`smallos_websocket_server.py`](./smallos_websocket_server.py): local SmallOS-friendly websocket server helper used by the app
+- [`smallos.config.json`](./smallos.config.json): SmallOS runtime configuration for this application
+- [`requirements.txt`](./requirements.txt): Python dependencies, including the pinned SmallOS Git dependency
 - [`.env.example`](./.env.example): sample environment file for premium-room slug/label/admin settings, super-user access, and global limits
 - [`static/index.html`](./static/index.html): room page markup
 - [`static/landing.html`](./static/landing.html): public landing page
@@ -169,6 +171,5 @@ python3 -m unittest discover -s tests -v
 - [`static/app.css`](./static/app.css): shared UI styling
 - [`static/app.js`](./static/app.js): client-side websocket and room UI logic
 - [`static/setup_room.js`](./static/setup_room.js): room creation flow
-- [`SmallOS/`](./SmallOS): bundled SmallOS framework used by the app
 - [`tests/test_scrum_poker_app.py`](./tests/test_scrum_poker_app.py): tests for room creation, auth, cleanup, and shell controls
 - [`tests/test_smallos_websocket_server.py`](./tests/test_smallos_websocket_server.py): tests for the local websocket server helper
