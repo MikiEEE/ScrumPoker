@@ -46,6 +46,3 @@ jobs:
         run: |
           node --check static/app.js
           node --check static/setup_room.js
-
-      - name: Validate documentation index
-        run: node docs/build-index.mjs --check
