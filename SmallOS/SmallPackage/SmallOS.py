@@ -15,7 +15,7 @@ from .awaitables import TaskInstruction
 from .SmallIO import SmallIO
 from .SmallConfig import SmallOSConfig
 from .OSlist import OSList
-from .SmallErrors import MaxProcessError, UnsupportedAwaitableError
+from .SmallErrors import MaxProcessError, TaskCancelledError, UnsupportedAwaitableError
 
 
 _MISSING = object()
@@ -63,6 +63,8 @@ class SmallOS(SmallIO):
         self.kernel = None
         self.eternalWatchers = self.config.eternal_watchers
         self.cursor = None
+        self.errorHandler = None
+        self.errorHandlerIncludeCancelled = False
 
         SmallIO.__init__(self, self.config.io_buffer_length)
         if kwargs:
@@ -146,6 +148,20 @@ class SmallOS(SmallIO):
         self.eternalWatchers = isEternalWatcherPresent
         return self
 
+    def setErrorHandler(self, handler, include_cancelled=False):
+        """
+        Install a best-effort runtime error observer for failed tasks.
+
+        ``handler`` is a synchronous callable that receives one failure-event
+        dictionary after the task has been finalized. Returning ``None`` removes
+        the current handler.
+        """
+        if handler is not None and not callable(handler):
+            raise TypeError("error handler must be callable or None.")
+        self.errorHandler = handler
+        self.errorHandlerIncludeCancelled = bool(include_cancelled)
+        return self
+
     def _wake_sleeping_tasks(self):
         """Promote every expired sleeping task back onto the ready queues."""
         if not self.kernel:
@@ -184,7 +200,7 @@ class SmallOS(SmallIO):
         """
         Requeue a blocked task with the value or exception that completed it.
 
-        Centralizing resume logic here ensures stale join registrations are
+        Centralizing resume logic here ensures scheduler-owned wait state is
         cleared before a task gets a chance to block on something else.
         """
         if task is None or task == -1 or task.done:
@@ -192,7 +208,7 @@ class SmallOS(SmallIO):
         if self.tasks.search(task.getID()) == -1:
             return -1
 
-        self._clear_wait_registration(task)
+        self._clear_wait_state(task)
         task.resume(value=value, exc=exc)
         self.tasks.enqueue(task, front=front)
         return 0
@@ -243,9 +259,7 @@ class SmallOS(SmallIO):
 
             delay_ms = max(0, int(seconds * 1000))
             wake_time = self.kernel.scheduler_now_ms() + delay_ms if self.kernel else delay_ms
-            task.block("sleep")
-            task._wake_at = wake_time
-            self.tasks.add_sleeping(task, wake_time)
+            self._enter_sleep_wait(task, wake_time)
             return
 
         if operation == "wait_signal":
@@ -253,22 +267,15 @@ class SmallOS(SmallIO):
             if task.checkSignal(signal):
                 self.resume_task(task, value=signal, front=True)
             else:
-                task.block("signal")
-                task._waiting_signal = signal
+                self._enter_signal_wait(task, signal)
             return
 
         if operation == "wait_readable":
-            task.block("wait_readable")
-            task._io_wait_obj = payload["io_obj"]
-            task._io_wait_mode = "read"
-            self._register_io_wait(task, payload["io_obj"], "read")
+            self._enter_io_wait(task, payload["io_obj"], "read")
             return
 
         if operation == "wait_writable":
-            task.block("wait_writable")
-            task._io_wait_obj = payload["io_obj"]
-            task._io_wait_mode = "write"
-            self._register_io_wait(task, payload["io_obj"], "write")
+            self._enter_io_wait(task, payload["io_obj"], "write")
             return
 
         if operation == "join":
@@ -281,9 +288,7 @@ class SmallOS(SmallIO):
             if target.done:
                 self._resume_from_completed(task, target)
             else:
-                task.block("join")
-                task._join_target = target
-                target.add_join_waiter(task)
+                self._enter_join_wait(task, target)
             return
 
         if operation == "join_all":
@@ -309,12 +314,7 @@ class SmallOS(SmallIO):
 
             # Preserve the original child ordering for the eventual results
             # while also tracking a fast set of outstanding child PIDs.
-            task.block("join_all")
-            task._join_targets = targets
-            task._join_pending = pending
-            for child in targets:
-                if not child.done:
-                    child.add_join_waiter(task)
+            self._enter_join_all_wait(task, targets, pending)
             return
 
         task.fail(UnsupportedAwaitableError("Unknown instruction {!r}".format(operation)))
@@ -354,6 +354,67 @@ class SmallOS(SmallIO):
                 return task.exception
         return None
 
+    def _clear_wait_state(self, task):
+        """
+        Remove a task from scheduler wait bookkeeping and reset its wait metadata.
+
+        The scheduler owns the blocked-state lifecycle, so runtime transitions
+        clear both registration-based wait structures and the task's stored wait
+        markers from one place.
+        """
+        self._clear_wait_registration(task)
+        self._clear_wait_metadata(task)
+
+    def _clear_wait_metadata(self, task):
+        """Reset the scheduler-owned wait metadata stored on ``task``."""
+        task._blocked_reason = None
+        task._wake_at = None
+        task._waiting_signal = None
+        task._join_target = None
+        task._join_targets = None
+        task._join_pending = set()
+        task._io_wait_obj = None
+        task._io_wait_mode = None
+
+    def _begin_wait(self, task, reason):
+        """Prepare a runnable task to transition into one blocked wait state."""
+        self._clear_wait_state(task)
+        task.block(reason)
+
+    def _enter_sleep_wait(self, task, wake_time):
+        """Put ``task`` to sleep until ``wake_time``."""
+        self._begin_wait(task, "sleep")
+        task._wake_at = wake_time
+        self.tasks.add_sleeping(task, wake_time)
+
+    def _enter_signal_wait(self, task, signal):
+        """Block ``task`` until ``signal`` is delivered."""
+        self._begin_wait(task, "signal")
+        task._waiting_signal = signal
+
+    def _enter_io_wait(self, task, io_obj, mode):
+        """Register ``task`` for readable or writable I/O readiness."""
+        reason = "wait_readable" if mode == "read" else "wait_writable"
+        self._begin_wait(task, reason)
+        task._io_wait_obj = io_obj
+        task._io_wait_mode = mode
+        self._register_io_wait(task, io_obj, mode)
+
+    def _enter_join_wait(self, task, target):
+        """Block ``task`` until ``target`` finishes."""
+        self._begin_wait(task, "join")
+        task._join_target = target
+        target.add_join_waiter(task)
+
+    def _enter_join_all_wait(self, task, targets, pending):
+        """Block ``task`` until every child in ``pending`` has completed."""
+        self._begin_wait(task, "join_all")
+        task._join_targets = list(targets)
+        task._join_pending = set(pending)
+        for child in targets:
+            if not child.done:
+                child.add_join_waiter(task)
+
     def _register_io_wait(self, task, io_obj, mode):
         """Register a task as waiting on an I/O object's readiness event."""
         waiters = self.ioReadWaiters if mode == "read" else self.ioWriteWaiters
@@ -374,6 +435,9 @@ class SmallOS(SmallIO):
             return
         if not self.ioReadWaiters and not self.ioWriteWaiters:
             return
+        self._fail_invalid_io_waiters()
+        if not self.ioReadWaiters and not self.ioWriteWaiters:
+            return
 
         readable, writable = self.kernel.io_wait(
             list(self.ioReadWaiters.keys()),
@@ -382,6 +446,43 @@ class SmallOS(SmallIO):
         )
         self._resume_io_waiters(readable, self.ioReadWaiters)
         self._resume_io_waiters(writable, self.ioWriteWaiters)
+
+    def _fail_invalid_io_waiters(self):
+        """
+        Resume waiters whose I/O objects are already closed or otherwise invalid.
+
+        Poll/select backends raise immediately when handed a stale descriptor,
+        which would otherwise take down the whole runtime before the affected
+        task can observe the problem.
+        """
+        validator = getattr(self.kernel, "validate_io_wait_object", None)
+        if validator is None:
+            return
+        self._fail_invalid_io_waiters_in_map(self.ioReadWaiters, validator)
+        self._fail_invalid_io_waiters_in_map(self.ioWriteWaiters, validator)
+
+    def _fail_invalid_io_waiters_in_map(self, waiters_map, validator):
+        """Detach invalid I/O objects from ``waiters_map`` and fail their waiters."""
+        for io_obj in list(waiters_map.keys()):
+            is_valid, exc = validator(io_obj)
+            if is_valid:
+                continue
+
+            waiters = waiters_map.pop(io_obj, [])
+            for waiter in waiters:
+                if waiter.done or self.tasks.search(waiter.getID()) == -1:
+                    continue
+                self.resume_task(waiter, exc=self._clone_wait_error(exc), front=True)
+
+    def _clone_wait_error(self, exc):
+        """Return a fresh exception instance for resuming a blocked waiter."""
+        if isinstance(exc, BaseException):
+            args = getattr(exc, "args", ())
+            try:
+                return exc.__class__(*args)
+            except Exception:
+                return RuntimeError(str(exc))
+        return RuntimeError("I/O wait object is no longer valid.")
 
     def _resume_io_waiters(self, ready_objects, waiters_map):
         """Resume every task waiting on the now-ready I/O objects."""
@@ -394,20 +495,17 @@ class SmallOS(SmallIO):
 
     def _clear_wait_registration(self, task):
         """
-        Remove a task from any join bookkeeping it currently participates in.
+        Remove a task from any registration-based wait bookkeeping.
 
         This prevents leaked waiter references when a task is resumed,
         cancelled, or moved from one wait condition to another.
         """
         if task._join_target is not None:
             task._join_target.discard_join_waiter(task)
-            task._join_target = None
 
         if task._join_targets:
             for child in task._join_targets:
                 child.discard_join_waiter(task)
-            task._join_targets = None
-            task._join_pending = set()
 
         if task._io_wait_obj is not None and task._io_wait_mode is not None:
             waiters_map = self.ioReadWaiters if task._io_wait_mode == "read" else self.ioWriteWaiters
@@ -416,8 +514,85 @@ class SmallOS(SmallIO):
                 waiters.remove(task)
             if not waiters and task._io_wait_obj in waiters_map:
                 del waiters_map[task._io_wait_obj]
-            task._io_wait_obj = None
-            task._io_wait_mode = None
+
+    def _should_dispatch_failure(self, task):
+        """Return whether ``task`` should produce a runtime failure event."""
+        exc = task.exception
+        if exc is None:
+            return False
+        if isinstance(exc, TaskCancelledError) and not self.errorHandlerIncludeCancelled:
+            return False
+        return True
+
+    def _snapshot_task_id(self, task):
+        """Return a task or PID reference as a PID integer when possible."""
+        if task is None or task == -1:
+            return None
+        if hasattr(task, "getID"):
+            return task.getID()
+        if isinstance(task, int):
+            return task
+        return None
+
+    def _format_exception_traceback(self, exc):
+        """Return a best-effort formatted traceback string for ``exc``."""
+        try:
+            import traceback
+        except ImportError:
+            return None
+
+        try:
+            return "".join(
+                traceback.format_exception(type(exc), exc, getattr(exc, "__traceback__", None))
+            )
+        except Exception:
+            try:
+                return "".join(traceback.format_exception_only(type(exc), exc))
+            except Exception:
+                return None
+
+    def _build_failure_event(self, task):
+        """Snapshot the task failure context before finalization clears wait state."""
+        exc = task.exception
+        return {
+            "task_id": task.getID(),
+            "task_name": task.name,
+            "parent_id": self._snapshot_task_id(task.parent),
+            "exception": exc,
+            "exception_type": type(exc).__name__ if exc is not None else None,
+            "exception_repr": repr(exc),
+            "is_cancelled": isinstance(exc, TaskCancelledError),
+            "blocked_reason": task._blocked_reason,
+            "waiting_signal": task._waiting_signal,
+            "io_wait_mode": task._io_wait_mode,
+            "join_target_id": self._snapshot_task_id(task._join_target),
+            "join_pending_ids": sorted(task._join_pending) if task._join_pending else [],
+            "traceback_text": self._format_exception_traceback(exc),
+        }
+
+    def _write_runtime_diagnostic(self, message):
+        """Write a best-effort runtime diagnostic without crashing the scheduler."""
+        if not message:
+            return
+        if not message.endswith("\n"):
+            message += "\n"
+        try:
+            if self.kernel and hasattr(self.kernel, "write"):
+                self.kernel.write(message)
+        except Exception:
+            return
+
+    def _dispatch_error_handler(self, event):
+        """Invoke the installed runtime error handler without surfacing its failures."""
+        if self.errorHandler is None:
+            return
+        try:
+            self.errorHandler(event)
+        except Exception as exc:
+            diagnostic = self._format_exception_traceback(exc) or repr(exc)
+            self._write_runtime_diagnostic(
+                "smallOS error handler failed: {}".format(diagnostic.rstrip("\n"))
+            )
 
     def _detach_from_parent(self, task):
         """Remove a finished child PID from its parent's child list."""
@@ -445,7 +620,6 @@ class SmallOS(SmallIO):
                 continue
 
             if waiter._blocked_reason == "join" and waiter._join_target is task:
-                waiter._join_target = None
                 self._resume_from_completed(waiter, task)
                 continue
 
@@ -453,22 +627,25 @@ class SmallOS(SmallIO):
                 if task.exception is not None:
                     # ``join_all`` behaves like structured concurrency here:
                     # one child failure wakes the parent immediately.
-                    self._clear_wait_registration(waiter)
                     self.resume_task(waiter, exc=task.exception, front=True)
                     continue
 
                 waiter._join_pending.discard(task.getID())
                 if not waiter._join_pending:
                     results = [child.result for child in waiter._join_targets]
-                    self._clear_wait_registration(waiter)
                     self.resume_task(waiter, value=results, front=True)
 
     def _finalize_task(self, task):
         """Run the full shutdown sequence for a finished or cancelled task."""
-        self._clear_wait_registration(task)
+        failure_event = None
+        if self._should_dispatch_failure(task):
+            failure_event = self._build_failure_event(task)
+        self._clear_wait_state(task)
         self._notify_waiters(task)
         self._detach_from_parent(task)
         self.tasks.delete(task.getID())
+        if failure_event is not None:
+            self._dispatch_error_handler(failure_event)
 
     def cancel_task(self, task, recursive=False):
         """Cancel a task by object or PID and optionally cancel its descendants."""

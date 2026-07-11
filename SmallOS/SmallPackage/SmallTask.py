@@ -197,11 +197,6 @@ class SmallTask(SmallSignals, Node):
         """Mark the task as successfully finished and store its result."""
         self._done = True
         self._result = result
-        self._blocked_reason = None
-        self._wake_at = None
-        self._waiting_signal = None
-        self._io_wait_obj = None
-        self._io_wait_mode = None
         self.isReady = 0
         self.isWaiting = 0
         self.isSleep = 0
@@ -212,11 +207,6 @@ class SmallTask(SmallSignals, Node):
         """Mark the task as failed and store its terminal exception."""
         self._done = True
         self._exception = exc
-        self._blocked_reason = None
-        self._wake_at = None
-        self._waiting_signal = None
-        self._io_wait_obj = None
-        self._io_wait_mode = None
         self.isReady = 0
         self.isWaiting = 0
         self.isSleep = 0
@@ -245,13 +235,9 @@ class SmallTask(SmallSignals, Node):
         Prepare the task to run again after a wait condition completes.
 
         ``value`` is sent into the coroutine on the next step. ``exc`` is thrown
-        into it instead. The scheduler chooses which of those channels to use.
+        into it instead. The scheduler chooses which of those channels to use
+        and is responsible for clearing any wait metadata beforehand.
         """
-        self._blocked_reason = None
-        self._wake_at = None
-        self._waiting_signal = None
-        self._io_wait_obj = None
-        self._io_wait_mode = None
         self.isReady = 1
         self.isWaiting = 0
         self.isSleep = 0
