@@ -147,7 +147,7 @@ Premium room limits:
 
 ## Tests
 
-The lightweight GitHub Actions workflow in [`.github/workflows/tests.yml`](./.github/workflows/tests.yml) runs on pushes to `master`, pull requests, and manual dispatches. It installs the pinned SmallOS dependency, runs the focused test suite, checks Python and JavaScript syntax, and validates the generated documentation index.
+The lightweight GitHub Actions workflow in [`.github/workflows/tests.yml`](./.github/workflows/tests.yml) runs on pushes to `master`, pull requests, and manual dispatches. It installs the pinned SmallOS dependency, runs the focused test suite, and checks Python and JavaScript syntax.
 
 Focused scrum poker tests:
 
