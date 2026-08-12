@@ -1,6 +1,8 @@
 # Scrum Poker App
 
-A websocket scrum poker web app built on top of the included `SmallOS` framework.
+[![Tests](https://github.com/MikiEEE/ScrumPoker/actions/workflows/tests.yml/badge.svg)](https://github.com/MikiEEE/ScrumPoker/actions/workflows/tests.yml)
+
+A websocket scrum poker web app built on top of the `SmallOS` framework.
 
 The app now runs one premium permanent room plus a pool of ephemeral GUID rooms on one cooperative SmallOS runtime. A shared host task owns the listener, public landing/setup flow, room registry, and expiry cleanup.
 
@@ -12,6 +14,8 @@ The app now runs one premium permanent room plus a pool of ephemeral GUID rooms 
 - Promote yourself to admin with the room password or `SUPER_USER_PASSPHRASE`
 - Keep one configurable premium room locked behind its premium admin password
 - Cast point votes in real time
+- Switch between point voting and 128-character short answers as an admin
+- Mark short answers Ready or Not Ready before revealing them
 - See when teammates have voted without revealing hidden values
 - Show or hide all votes on the board
 - Discard the current round's votes
@@ -28,8 +32,15 @@ The app now runs one premium permanent room plus a pool of ephemeral GUID rooms 
 ## Requirements
 
 - Python 3
+- Git (used by `pip` to install SmallOS from GitHub)
 
-No extra dependencies are required for the scrum poker app itself.
+Install the Python dependencies before running the app:
+
+```bash
+python3 -m pip install -r requirements.txt
+```
+
+SmallOS is pinned to a specific upstream commit in `requirements.txt` so installs are reproducible.
 
 ## Run The App
 
@@ -80,6 +91,7 @@ Users can:
 - Enter a display name and join the session
 - Click `Become Admin`, enter the room password, and receive success or failure feedback
 - Vote using the on-screen cards
+- Enter a short answer and explicitly mark it Ready when the room is in short-answer mode
 - See who has already voted
 - Reveal or hide the board
 - Clear the current round
@@ -89,6 +101,7 @@ Admins can:
 - Open the session for new users
 - Close the session for new users
 - Kick users off the board
+- Switch the room between Pointing and Short Answer modes
 - Appear with an `Admin` badge beside their name
 
 The creator of a new ephemeral room is auto-promoted to admin in that browser session. Premium-room admin access uses `PREMIUM_ROOM_ADMIN_PASSPHRASE`, then falls back to `ADMIN_PASSPHRASE`, and `SUPER_USER_PASSPHRASE` works everywhere.
@@ -134,6 +147,8 @@ Premium room limits:
 
 ## Tests
 
+The lightweight GitHub Actions workflow in [`.github/workflows/tests.yml`](./.github/workflows/tests.yml) runs on pushes to `master`, pull requests, and manual dispatches. It installs the pinned SmallOS dependency, runs the focused test suite, and checks Python and JavaScript syntax.
+
 Focused scrum poker tests:
 
 ```bash
@@ -146,13 +161,6 @@ Local benchmark helper:
 python3 benchmark_scrum_poker.py
 ```
 
-Full SmallOS test suite:
-
-```bash
-cd SmallOS
-python3 -m unittest discover -s tests -v
-```
-
 ## Project Structure
 
 - [`app.py`](./app.py): executable SmallOS entrypoint and premium-room composition
@@ -162,6 +170,8 @@ python3 -m unittest discover -s tests -v
 - [`scrum_poker_shell.py`](./scrum_poker_shell.py): SmallOS shell commands for premium and GUID rooms
 - [`benchmark_scrum_poker.py`](./benchmark_scrum_poker.py): lightweight benchmark for room fanout behavior
 - [`smallos_websocket_server.py`](./smallos_websocket_server.py): local SmallOS-friendly websocket server helper used by the app
+- [`smallos.config.json`](./smallos.config.json): SmallOS runtime configuration for this application
+- [`requirements.txt`](./requirements.txt): Python dependencies, including the pinned SmallOS Git dependency
 - [`.env.example`](./.env.example): sample environment file for premium-room slug/label/admin settings, super-user access, and global limits
 - [`static/index.html`](./static/index.html): room page markup
 - [`static/landing.html`](./static/landing.html): public landing page
@@ -169,6 +179,5 @@ python3 -m unittest discover -s tests -v
 - [`static/app.css`](./static/app.css): shared UI styling
 - [`static/app.js`](./static/app.js): client-side websocket and room UI logic
 - [`static/setup_room.js`](./static/setup_room.js): room creation flow
-- [`SmallOS/`](./SmallOS): bundled SmallOS framework used by the app
 - [`tests/test_scrum_poker_app.py`](./tests/test_scrum_poker_app.py): tests for room creation, auth, cleanup, and shell controls
 - [`tests/test_smallos_websocket_server.py`](./tests/test_smallos_websocket_server.py): tests for the local websocket server helper
