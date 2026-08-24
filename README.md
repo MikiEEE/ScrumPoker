@@ -149,6 +149,10 @@ Premium room limits:
 
 The lightweight GitHub Actions workflow in [`.github/workflows/tests.yml`](./.github/workflows/tests.yml) runs on pushes to `master`, pull requests, and manual dispatches. It installs the pinned SmallOS dependency, runs the focused test suite, and checks Python and JavaScript syntax.
 
+## Releases
+
+When a pull request is merged into `master`, [`.github/workflows/release.yml`](./.github/workflows/release.yml) creates a GitHub Release. Releases use the next `vX.Y.Z` patch version after the latest semantic-version tag (for example, `1.0.0` becomes `v1.0.1`) and include automatically generated release notes.
+
 Focused scrum poker tests:
 
 ```bash
