@@ -4,8 +4,8 @@ import html
 import json
 import os
 
-from SmallOS.SmallPackage import SmallTask
-from SmallOS.SmallPackage.SmallErrors import TaskCancelledError
+from SmallPackage import SmallTask
+from SmallPackage.SmallErrors import TaskCancelledError
 
 from smallos_websocket_server import SmallWebSocketServerConnection, WebSocketServerProtocolError
 from scrum_poker_core import (

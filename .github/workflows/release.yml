@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  pull_request:
+    branches: [master]
+    types: [closed]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-master
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Create GitHub release
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the merged commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+
+      - name: Calculate release version
+        id: version
+        env:
+          TARGET_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --force --tags
+
+          tag="$(git tag --points-at "$TARGET_SHA" | awk '/^v?[0-9]+\.[0-9]+\.[0-9]+$/ { print; exit }')"
+          if [ -z "$tag" ]; then
+            latest_tag="$(git tag --merged "$TARGET_SHA" --sort=-version:refname | awk '/^v?[0-9]+\.[0-9]+\.[0-9]+$/ { print; exit }')"
+            latest_tag="${latest_tag#v}"
+            latest_tag="${latest_tag:-0.0.0}"
+            IFS=. read -r major minor patch <<< "$latest_tag"
+            tag="v${major}.${minor}.$((10#$patch + 1))"
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          TARGET_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists."
+          else
+            gh release create "$TAG" \
+              --target "$TARGET_SHA" \
+              --title "Release $TAG" \
+              --generate-notes
+          fi
